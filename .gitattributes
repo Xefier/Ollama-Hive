@@ -1,0 +1,3 @@
+# Hive runs these on Linux: a CR at the end of a line breaks them
+*.sh text eol=lf
+*.conf text eol=lf
