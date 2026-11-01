@@ -86,6 +86,16 @@ find_gpu_user() {
     fi
 }
 
+# Tries the rig's package lists as they are first: refreshing them is slow and usually not needed
+install_package() {
+    log "Installing $1"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$1" >> "$LOG_FILE" 2>&1 && return 0
+    apt-get update >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$1" >> "$LOG_FILE" 2>&1 && return 0
+    log "Could not install $1"
+    return 1
+}
+
 install_ollama() {
     local wanted=$OH_OLLAMA_VERSION
     if [[ -x $OH_BIN ]]; then
@@ -99,10 +109,7 @@ install_ollama() {
     mkdir -p "$OH_DATA_DIR"
 
     if curl -fsSIL "$base.tar.zst$query" >/dev/null 2>&1; then
-        if ! command -v zstd >/dev/null 2>&1; then
-            log "Installing zstd"
-            apt-get install -y zstd >> "$LOG_FILE" 2>&1 || { log "Could not install zstd"; return 1; }
-        fi
+        command -v zstd >/dev/null 2>&1 || install_package zstd || return 1
         curl -fL --retry 3 -C - -o "$archive" "$base.tar.zst$query" &
         wait $! || return 1
         zstd -dc "$archive" | tar -xf - -C "$OH_DATA_DIR" || return 1
@@ -138,6 +145,8 @@ check_gpu_tuning() {
 
 # LAN only: Ollama has no authentication of its own
 open_firewall() {
+    command -v iptables >/dev/null 2>&1 || install_package iptables || return 1
+
     local allow=${OH_ALLOW//,/ }
     if [[ -z $allow ]]; then
         allow=$(ip -o -4 route show scope link 2>/dev/null |

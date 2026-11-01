@@ -8,7 +8,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.1.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.2.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -48,7 +48,8 @@ DOCKER drive only means downloading them again.
    yet can't be detected: check for rentals and take the node off the market first.** If Octa keeps its own containers
    running with no rental, it waits for those too: stop them, or set `allow_docker=1` once you have checked them.
 2. It downloads Ollama if needed and warns about power limits left by a mining OC profile.
-3. It adds firewall rules so only `allow` can reach the port. If that fails, the server isn't started.
+3. It adds firewall rules so only `allow` can reach the port, installing `iptables` first if the rig has none. If that
+   fails, the server isn't started.
 4. It stops `hive-watchdog`, then starts Ollama, pulls the model and loads it. The log says how much is on the GPU.
 
 **Switching away (or a stop or reboot):** Ollama and its model runner end, the firewall rules go, and the watchdog

@@ -2,6 +2,9 @@
 
 # Shared by h-run.sh, h-stop.sh, h-guard.sh and h-stats.sh.
 
+# Hive's miner screen doesn't always have the admin folders on its PATH (iptables was "not found" there on a rig)
+export PATH="$PATH:/usr/sbin:/sbin"
+
 OH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$OH_DIR/h-manifest.conf"
 
