@@ -26,11 +26,8 @@ pkill -KILL -f "^$OH_BIN( |$)" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/lib/ollama" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/ollama-download" 2>/dev/null
 
-for (( i = 0; i < 20; i++ )); do
-    iptables -D INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN" 2>/dev/null || break
-done
-iptables -F "$OH_CHAIN" 2>/dev/null
-iptables -X "$OH_CHAIN" 2>/dev/null
+oh_remove_firewall
+rm -f "$OH_RUN_DIR/address"
 
 if [[ -f $OH_RUN_DIR/watchdog-stopped ]]; then
     systemctl start "$OH_WATCHDOG" && echo "Hive watchdog started"

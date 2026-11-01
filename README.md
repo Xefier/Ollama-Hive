@@ -8,7 +8,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.2.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.3.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -28,6 +28,7 @@ num_parallel=2
 | `num_ctx` | `32768` | Context size per request |
 | `num_parallel` | `2` | Requests served at once. VRAM use grows with `num_ctx` x `num_parallel` |
 | `port` | `11434` | API port |
+| `bind` | the rig's private LAN address | Address to listen on. Anything else on that network can reach it unless the firewall limits it |
 | `allow` | the rig's own LAN | Comma-separated CIDRs allowed to connect, e.g. `192.168.1.0/24` |
 | `data_dir` | see below | Where Ollama and the models are kept |
 | `ollama_version` | latest at first install | Pins a version, e.g. `0.14.0` |
@@ -48,9 +49,12 @@ DOCKER drive only means downloading them again.
    yet can't be detected: check for rentals and take the node off the market first.** If Octa keeps its own containers
    running with no rental, it waits for those too: stop them, or set `allow_docker=1` once you have checked them.
 2. It downloads Ollama if needed and warns about power limits left by a mining OC profile.
-3. It adds firewall rules so only `allow` can reach the port, installing `iptables` first if the rig has none. If that
-   fails, the server isn't started.
-4. It stops `hive-watchdog`, then starts Ollama, pulls the model and loads it. The log says how much is on the GPU.
+3. It adds firewall rules so only `allow` can reach the port, trying `iptables` and then `iptables-legacy`, and reads
+   them back to confirm they work. Some Hive kernels can't do this. Then it warns on the dashboard and carries on, since
+   the server only listens on the private address anyway. If you set `allow` yourself, it won't start without rules
+   to enforce it. It never installs `iptables`, because Octa's Docker shares that system.
+4. It stops `hive-watchdog`, then starts Ollama on the rig's private LAN address (never `0.0.0.0`), pulls the model and
+   loads it. The log says how much is on the GPU. If the rig has no private address, it waits and says so.
 
 **Switching away (or a stop or reboot):** Ollama and its model runner end, the firewall rules go, and the watchdog
 starts again if it was running. `h-guard.sh` does the same if `h-run.sh` is killed outright.
@@ -88,7 +92,7 @@ miner log
 ```
 
 ```bash
-curl -s http://127.0.0.1:11434/api/ps | jq
+curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 ```
 
 `size_vram` should equal `size`. If not, the model has spilled out of VRAM: lower `num_ctx` or `num_parallel`.

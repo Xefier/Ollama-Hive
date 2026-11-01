@@ -66,6 +66,7 @@ wait_for_blocker() {
 
 find_settings_problem() {
     [[ -n $OH_MODEL ]] || { echo "No model set: add model=<name> to the flight sheet's Extra config arguments"; return; }
+    [[ -n $(oh_lan_address) ]] || { echo "No private LAN address found: set bind=<address> in the flight sheet"; return; }
     command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU' \
         || echo "No NVIDIA GPU found: this miner only supports NVIDIA"
 }
@@ -143,27 +144,49 @@ check_gpu_tuning() {
         done
 }
 
-# LAN only: Ollama has no authentication of its own
-open_firewall() {
-    command -v iptables >/dev/null 2>&1 || install_package iptables || return 1
+# Reading the rules back counts: on some Hive kernels iptables adds a chain it can't then read ("is incompatible")
+apply_firewall() {
+    local command=$1 allow=$2 cidr
+    "$command" -N "$OH_CHAIN" 2>/dev/null
+    "$command" -F "$OH_CHAIN" || return 1
+    "$command" -A "$OH_CHAIN" -i lo -j ACCEPT || return 1
+    for cidr in $allow; do
+        "$command" -A "$OH_CHAIN" -s "$cidr" -j ACCEPT || return 1
+    done
+    "$command" -A "$OH_CHAIN" -j DROP || return 1
+    "$command" -I INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN" || return 1
+    "$command" -S "$OH_CHAIN" >/dev/null || return 1
+    "$command" -C INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN"
+}
 
+# A second layer: the server only listens on the private address anyway, so a default setup still runs without working
+# firewall rules. An explicit allow= is a limit that was asked for, so without rules to enforce it the server doesn't start.
+open_firewall() {
     local allow=${OH_ALLOW//,/ }
     if [[ -z $allow ]]; then
         allow=$(ip -o -4 route show scope link 2>/dev/null |
             awk '$3 !~ /^(docker|br-|veth|virbr)/ && $1 ~ /\// {print $1}' | tr '\n' ' ')
     fi
-    [[ -n ${allow// /} ]] || { log "Could not work out the LAN: set allow=<cidr> in the flight sheet"; return 1; }
 
-    iptables -N "$OH_CHAIN" 2>/dev/null
-    iptables -F "$OH_CHAIN" || return 1
-    iptables -A "$OH_CHAIN" -i lo -j ACCEPT || return 1
-    local cidr
-    for cidr in $allow; do
-        iptables -A "$OH_CHAIN" -s "$cidr" -j ACCEPT || return 1
-    done
-    iptables -A "$OH_CHAIN" -j DROP || return 1
-    iptables -I INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN" || return 1
-    log "Port $OH_PORT is open to: $allow"
+    local command
+    if [[ -n ${allow// /} ]]; then
+        for command in iptables iptables-legacy; do
+            command -v "$command" >/dev/null 2>&1 || continue
+            if apply_firewall "$command" "$allow" >> "$LOG_FILE" 2>&1; then
+                log "Firewall set with $command: port $OH_PORT is open to: $allow"
+                return 0
+            fi
+            log "$command could not set the firewall rules"
+            oh_remove_firewall
+        done
+    fi
+
+    if [[ -n $OH_ALLOW ]]; then
+        log "allow=$OH_ALLOW can't be enforced on this rig without working firewall rules"
+        return 1
+    fi
+    notify warn "No working firewall on this rig: anything on the LAN can reach port $OH_PORT"
+    return 0
 }
 
 # The watchdog's low hashrate, minimum power and load checks all mean something else here: an idle model is not a
@@ -177,8 +200,16 @@ stop_watchdog() {
 }
 
 start_server() {
+    # Looked up on every start, in case the rig's DHCP lease changed its address
+    local address
+    address=$(oh_lan_address)
+    [[ -n $address ]] || { log "No private LAN address found"; return 1; }
+    echo "$address" > "$OH_RUN_DIR/address"
+    OH_API="http://$address:$OH_PORT"
+    log "Listening on $address:$OH_PORT"
+
     export HOME="$OH_DATA_DIR/home"
-    export OLLAMA_HOST="0.0.0.0:$OH_PORT"
+    export OLLAMA_HOST="$address:$OH_PORT"
     export OLLAMA_MODELS="$OH_DATA_DIR/models"
     export OLLAMA_CONTEXT_LENGTH="$OH_NUM_CTX"
     export OLLAMA_NUM_PARALLEL="$OH_NUM_PARALLEL"
@@ -204,10 +235,10 @@ start_server() {
 # Retries, so an unreachable registry doesn't stop a model that is already on disk from being used later
 prepare_model() {
     while kill -0 "$SERVER_PID" 2>/dev/null; do
-        if ! OLLAMA_HOST="127.0.0.1:$OH_PORT" "$OH_BIN" show "$OH_MODEL" >/dev/null 2>&1; then
+        if ! "$OH_BIN" show "$OH_MODEL" >/dev/null 2>&1; then
             oh_set_state pulling
             log "Pulling $OH_MODEL. Free space: $(df -h --output=avail "$OH_DATA_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')"
-            OLLAMA_HOST="127.0.0.1:$OH_PORT" "$OH_BIN" pull "$OH_MODEL" >> "$LOG_FILE" 2>&1 &
+            "$OH_BIN" pull "$OH_MODEL" >> "$LOG_FILE" 2>&1 &
             if ! wait $!; then
                 notify warn "Could not pull $OH_MODEL, retrying in 60 s. See the miner log."
                 pause 60
@@ -254,9 +285,9 @@ done
 
 check_gpu_tuning
 
-# Fails closed: without the firewall rules the server is never started on 0.0.0.0
+# Fails closed when allow= was set. See open_firewall.
 until open_firewall; do
-    notify warn "Could not set the firewall rules, retrying in 60 s."
+    notify warn "Could not enforce allow=, retrying in 60 s."
     oh_set_state waiting
     pause 60
 done

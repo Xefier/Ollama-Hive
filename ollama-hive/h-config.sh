@@ -12,6 +12,7 @@ ollama_hive_valid() {
         data_dir)                       [[ $2 =~ ^/[A-Za-z0-9._/-]+$ ]] ;;
         ollama_version)                 [[ $2 =~ ^[A-Za-z0-9.+-]+$ ]] ;;
         gpus)                           [[ $2 =~ ^[0-9,]+$ ]] ;;
+        bind)                           [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && $2 != 0.0.0.0 ]] ;;
         reset_oc|allow_docker)          [[ $2 =~ ^[01]$ ]] ;;
         *)                              return 2 ;;
     esac
