@@ -114,8 +114,10 @@ tr:last-child td { border-bottom: 0; }
       <span class="hint" id="t-calls-hint">—</span>
     </div>
     <div class="tile">
-      <span class="label">Claude cost avoided</span>
+      <span class="label">Plan cost avoided this week</span>
       <span class="big" id="t-cost">—</span>
+      <span class="hint" id="t-cost-hint">Saved percent of the weekly limit × the plan's weekly price</span>
+      <label class="price" for="plan-price">Plan <input id="plan-price" type="number" min="0" step="1" inputmode="decimal" value="280"> <input id="plan-currency" type="text" maxlength="4" size="4" value="CAD"> a month <span class="state" id="plan-price-state"></span></label>
       <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="20"> USD per million tokens in context <span class="state" id="price-state"></span></label>
       <label class="price" for="usd-pct">1% of the weekly limit = <input id="usd-pct" type="number" min="0" step="0.01" inputmode="decimal" placeholder="?"> USD of API-rate use <span class="state" id="usd-pct-state"></span></label>
     </div>
@@ -127,7 +129,7 @@ tr:last-child td { border-bottom: 0; }
       <span class="hint" id="week-hint">Weeks run from one usage reset to the next</span>
     </div>
     <table>
-      <thead><tr><th>Week from</th><th>Calls</th><th>Read</th><th>Saved</th><th>Cost avoided</th><th>Of weekly limit</th></tr></thead>
+      <thead><tr><th>Week from</th><th>Calls</th><th>Read</th><th>Saved</th><th>Of weekly limit</th><th>Plan cost</th><th>API cost</th></tr></thead>
       <tbody id="weeks"><tr><td colspan="6" class="empty">Weeks appear here after the first sync.</td></tr></tbody>
     </table>
   </section>
@@ -218,6 +220,12 @@ tr:last-child td { border-bottom: 0; }
   const localDay = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 
   const money = (tokens) => { const c = (tokens / 1e6) * price(); return "$" + c.toFixed(c < 10 ? 2 : 0); };
+  const planMonthly = () => { const v = Number(info.plan_price_month); return isFinite(v) && v > 0 ? v : 280; };
+  const planCurrency = () => (typeof info.plan_currency === "string" && info.plan_currency.trim()) ? info.plan_currency.trim().toUpperCase() : "CAD";
+  const planWeekly = () => planMonthly() * 12 / 52;
+  // Plan cost avoided: the saved share of the weekly limit, times what a week of the plan costs. Needs the percent calibration.
+  const planCost = (tokens) => { const v = pct(tokens); return v === null ? null : (v / 100) * planWeekly(); };
+  const fmtPlan = (c) => c === null ? "—" : c.toFixed(2) + " " + planCurrency();
   const usdPerPct = () => { const v = Number(info.usd_per_pct); return isFinite(v) && v > 0 ? v : null; };
   const pct = (tokens) => { const u = usdPerPct(); if (!u) return null; return ((tokens / 1e6) * price()) / u; };
   const fmtPct = (v) => v === null ? "—" : (v < 10 ? v.toFixed(1) : v.toFixed(0)) + "%";
@@ -251,8 +259,12 @@ tr:last-child td { border-bottom: 0; }
         + " · last week " + (pct(prev.saved_tokens) !== null ? fmtPct(pct(prev.saved_tokens)) : fmt(prev.saved_tokens)) + " · all time " + fmt(t.saved_tokens) + " (" + money(t.saved_tokens) + ")";
     const usd = $("usd-pct");
     if (document.activeElement !== usd) usd.value = usdPerPct() === null ? "" : String(usdPerPct());
-    const cost = (t.saved_tokens / 1e6) * price();
-    $("t-cost").textContent = rows.length ? "$" + cost.toFixed(cost < 10 ? 2 : 0) : "—";
+    const weekPlan = planCost(week.saved_tokens);
+    $("t-cost").textContent = !rows.length ? "—" : weekPlan === null ? "—" : fmtPlan(weekPlan);
+    $("t-cost-hint").textContent = !rows.length ? "Saved percent of the weekly limit × the plan's weekly price"
+      : weekPlan === null ? "Needs the \"1% of the weekly limit\" calibration below"
+      : "A plan week is " + planWeekly().toFixed(2) + " " + planCurrency() + " · all time " + fmtPlan(planCost(t.saved_tokens)) + " · API-rate all time " + money(t.saved_tokens) + " USD";
+    for (const [id, val] of [["plan-price", String(planMonthly())], ["plan-currency", planCurrency()]]) { const el = $(id); if (document.activeElement !== el) el.value = val; }
     const input = $("price");
     if (document.activeElement !== input) input.value = String(price());
     $("refusals").textContent = t.refusals + " refused";
@@ -379,7 +391,7 @@ tr:last-child td { border-bottom: 0; }
       if (!g.calls && w !== cur) continue;
       const tr = document.createElement("tr");
       if (w === cur) tr.className = "current";
-      for (const v of [weekLabel(w) + (w === cur ? " (this week)" : ""), g.calls.toLocaleString("en-US"), fmt(g.prompt_tokens), fmt(g.saved_tokens), money(g.saved_tokens), fmtPct(pct(g.saved_tokens))]) {
+      for (const v of [weekLabel(w) + (w === cur ? " (this week)" : ""), g.calls.toLocaleString("en-US"), fmt(g.prompt_tokens), fmt(g.saved_tokens), fmtPct(pct(g.saved_tokens)), fmtPlan(planCost(g.saved_tokens)), money(g.saved_tokens)]) {
         const td = document.createElement("td"); td.textContent = v; tr.append(td);
       }
       body.append(tr);
@@ -414,6 +426,15 @@ tr:last-child td { border-bottom: 0; }
   }
   bindMetaField("price", "price-state", "price_per_m", (v) => isFinite(v) && v >= 0, "not a price");
   bindMetaField("usd-pct", "usd-pct-state", "usd_per_pct", (v) => isFinite(v) && v > 0, "must be above 0");
+  bindMetaField("plan-price", "plan-price-state", "plan_price_month", (v) => isFinite(v) && v > 0, "must be above 0");
+  $("plan-currency").addEventListener("change", async () => {
+    const v = $("plan-currency").value.trim().toUpperCase().slice(0, 4) || "CAD";
+    info = { ...info, plan_currency: v }; render();
+    if (!db) return;
+    try { await db.doc("meta/info").set({ ...info, plan_currency: v }); $("plan-price-state").textContent = "saved"; }
+    catch (e) { $("plan-price-state").textContent = e && e.code === "invalid_argument" ? "view only" : "not saved"; }
+    clearTimeout(timers.plan_currency); timers.plan_currency = setTimeout(() => ($("plan-price-state").textContent = ""), 2500);
+  });
 
   let resizeTimer = null;
   window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderChart, 150); });
@@ -427,7 +448,7 @@ tr:last-child td { border-bottom: 0; }
     try {
       const user = await window.claude.use("user");
       const can = user && user.can ? await user.can("data.write") : null;
-      if (can === false) { $("price").disabled = true; $("usd-pct").disabled = true; }
+      if (can === false) { for (const id of ["price", "usd-pct", "plan-price", "plan-currency"]) $(id).disabled = true; }
     } catch (e) {}
   })();
 })();
