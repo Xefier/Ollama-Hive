@@ -14,3 +14,23 @@
    each PC syncs its own rows (ids are `pc+project+date`, chars outside `A-Za-z0-9_.~:@-` become `_`).
 6. The hand-entered seed row `DESKTOP-0Q0U62O+TheSneedRooms+2026-11-01` predates logging; the first sync from that PC that
    has a 2026-11-01 row overwrites it. Then drop "Hand-entered seed" from the note.
+
+## Calibrating the weekly percent
+
+The page shows "tokens the local model read instead of Claude" as a percent of the Claude plan's weekly limit. Nobody
+publishes how many tokens 1% is, so it is estimated from this PC's own Claude Code usage, priced at API list rates (only
+as a weighting across models):
+
+1. Read the usage card: in Claude Code, `mcp__ccd_session_mgmt__get_usage` returns `plan.windows[0].percentUsed` and
+   `resetsAt` (the NEXT reset, ISO).
+2. From the Ollama-Hive repo: `client\local-llm.cmd calibrate <percentUsed> --reset <resetsAt> --json`. It sums the
+   API-rate dollars of every Claude Code message in the week before that reset (transcripts under `~/.claude/projects`)
+   and returns `usd_per_pct` (total dollars / percent used). Check `unknown_models` is empty (unknown ids are priced as
+   Opus 5.5) and `messages` is not 0.
+3. In the same `ArtifactData` `batch` as the sync (or alone): `{op: "update", collection: "meta", doc_id: "info",
+   data: {usd_per_pct: <result.usd_per_pct>, week_reset: <resetsAt>}, if_version: <version>}`. The page uses both.
+
+It is an estimate: the plan's accounting is not published, and only this PC's Claude Code usage is counted (another PC
+or claude.ai chats on the same plan make 1% look cheaper than it is; calibrate from the PC that does most of the work).
+A calibration early in the week, at a low percent, is noisy: prefer one late in the week. Recalibrate when it drifts,
+e.g. once a month or after a plan or price change.

@@ -12,7 +12,9 @@ Environment:
   LOCAL_LLM_STATS   The usage log, one JSON line per call. Default %LOCALAPPDATA%\local-llm\stats.jsonl
                     (~/.local-llm/stats.jsonl where LOCALAPPDATA is not set).
 
-Run directly with --stats [days] [--json] it prints the usage summary instead of serving.
+Run directly with --stats [days] [--json] it prints the usage summary instead of serving, and with
+--calibrate <percent_used> [--reset <ISO> | --since <ISO>] [--json] it prices this PC's Claude Code usage (from the
+transcripts under ~/.claude/projects) to find how many API dollars one percent of the weekly subscription limit is.
 """
 
 import datetime
@@ -35,6 +37,25 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 CHARS_PER_TOKEN = 3.0
 RESERVED_ANSWER_TOKENS = 2048
 STATS_DAYS = 14
+
+# USD per million tokens (input, output, cache read, cache write 5m): API list prices as of 2026-11-01, used only as a
+# weighting to turn mixed-model token counts into one number for calibrating the subscription's weekly percent; the
+# plan does not bill at these prices. The first row whose substring is in the model id wins, so specific ids come
+# first. A 5-minute cache write is 1.25 x input (the last column); a 1-hour cache write is 2 x input
+# (CACHE_WRITE_1H_FACTOR), priced from the input column when the transcript splits the writes by duration.
+CLAUDE_PRICES = (
+    (("fable",), (10.0, 50.0, 0.25, 12.5)),
+    (("opus-5-5", "opus-5.5"), (4.0, 20.0, 0.20, 5.0)),
+    (("opus",), (5.0, 25.0, 0.50, 6.25)),
+    (("sonnet-5-5", "sonnet-5"), (2.0, 10.0, 0.20, 2.5)),
+    (("sonnet",), (3.0, 15.0, 0.30, 3.75)),
+    (("haiku-5-5",), (0.10, 0.50, 0.01, 0.125)),
+    (("haiku",), (1.0, 5.0, 0.10, 1.25)),
+)
+UNKNOWN_MODEL_PRICE = (4.0, 20.0, 0.20, 5.0)  # Opus 5.5's
+CACHE_WRITE_1H_FACTOR = 2.0
+TERMS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+WEEK = datetime.timedelta(days=7)
 
 TOOLS = [
     {
@@ -378,6 +399,129 @@ def stats(arguments):
     return "\n".join(lines)
 
 
+def model_price(model):
+    """The price row for a model id, and whether the id was recognised."""
+    for names, price in CLAUDE_PRICES:
+        if any(name in model for name in names):
+            return price, True
+    return UNKNOWN_MODEL_PRICE, False
+
+
+def parse_time(text):
+    """An ISO time (Z or an offset; none means UTC) as an aware UTC datetime. Raises ValueError."""
+    text = text.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    # Python 3.8's fromisoformat takes neither "Z" nor more than 6 fraction digits
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    value = datetime.datetime.fromisoformat(text)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc)
+
+
+def iso(value):
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def transcript_files(folder, since_epoch):
+    """The *.jsonl files under folder, subfolders included, changed since since_epoch: an older one holds nothing newer."""
+    for current, _folders, names in os.walk(folder):
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(current, name)
+            try:
+                if os.path.getmtime(path) < since_epoch:
+                    continue
+            except OSError:
+                continue
+            yield path
+
+
+def claude_usage(since, until):
+    """Every assistant message's usage in Claude Code's transcripts between since and until, once per message.id
+    (a streamed message is written as several lines that repeat its usage: the last line seen is kept).
+    Returns ({message_id: (model, input, output, cache_read, cache_write_5m, cache_write_1h)}, skipped lines or
+    files). Cache writes are split by duration from usage.cache_creation; without it they all count as 5-minute."""
+    folder = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    messages, skipped = {}, 0
+    for path in transcript_files(folder, since.timestamp()):
+        try:
+            with open(path, "rb") as file:
+                for line in file:
+                    # Most lines are tool results and user turns: skip them before paying for a JSON parse
+                    if b'"usage"' not in line:
+                        continue
+                    try:
+                        entry = json.loads(line.decode("utf-8"))
+                        if entry.get("type") != "assistant":
+                            continue
+                        message = entry.get("message") or {}
+                        usage = message.get("usage")
+                        if not isinstance(usage, dict):
+                            continue
+                        stamp = parse_time(entry["timestamp"])
+                        if stamp < since or stamp > until:
+                            continue
+                        key = message.get("id") or entry.get("uuid") or "{}#{}".format(path, len(messages))
+                        split = usage.get("cache_creation")
+                        if isinstance(split, dict) and ("ephemeral_5m_input_tokens" in split
+                                                        or "ephemeral_1h_input_tokens" in split):
+                            write_5m = int(split.get("ephemeral_5m_input_tokens") or 0)
+                            write_1h = int(split.get("ephemeral_1h_input_tokens") or 0)
+                        else:
+                            write_5m, write_1h = int(usage.get("cache_creation_input_tokens") or 0), 0
+                        messages[key] = (str(message.get("model") or "unknown"),
+                                         int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0),
+                                         int(usage.get("cache_read_input_tokens") or 0), write_5m, write_1h)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        skipped += 1
+        except OSError:
+            skipped += 1
+    return messages, skipped
+
+
+def calibrate(percent_used, since=None, reset=None):
+    """API-rate dollars of this PC's Claude Code usage in the window, and dollars per percent of the weekly limit."""
+    if percent_used <= 0:
+        raise ToolError("percent_used must be above 0")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if since is not None:
+        window = "from --since"
+    elif reset is not None:
+        since = reset - WEEK
+        window = "the week before the reset at {}".format(iso(reset))
+    else:
+        since = now - WEEK
+        window = "the last 7 days: no --reset or --since given, pass the usage card's reset time for the real window"
+    until = min(now, reset) if reset is not None and reset > since else now
+    messages, skipped = claude_usage(since, until)
+    by_model, by_term, unknown, total, counted = {}, dict.fromkeys(TERMS, 0.0), set(), 0.0, 0
+    for model, *tokens in messages.values():
+        if not any(tokens):
+            continue  # "<synthetic>" error messages and the like
+        price, known = model_price(model)
+        if not known:
+            unknown.add(model)
+        rates = price + (price[0] * CACHE_WRITE_1H_FACTOR,)
+        usd = 0.0
+        for term, count, rate in zip(TERMS, tokens, rates):
+            by_term[term] += count * rate / 1e6
+            usd += count * rate / 1e6
+        by_model[model] = by_model.get(model, 0.0) + usd
+        total += usd
+        counted += 1
+    return {
+        "since": iso(since), "until": iso(until), "window": window, "percent_used": percent_used,
+        "usd_total": round(total, 2),
+        "usd_by_model": {model: round(usd, 2) for model, usd in sorted(by_model.items(), key=lambda item: -item[1])},
+        "usd_by_term": {term: round(usd, 2) for term, usd in by_term.items()},
+        "messages": counted, "usd_per_pct": round(total / percent_used, 4),
+        "unknown_models": sorted(unknown), "skipped": skipped,
+    }
+
+
 HANDLERS = {"local_llm_status": status, "local_llm_ask": ask, "local_llm_stats": stats}
 
 
@@ -438,7 +582,58 @@ def print_stats(argv):
     return 0
 
 
+def option(argv, name):
+    """The value after --name, or None when it is not given."""
+    if name not in argv:
+        return None
+    index = argv.index(name)
+    if index + 1 >= len(argv):
+        raise ToolError("{} needs a value".format(name))
+    return argv[index + 1]
+
+
+def print_calibration(argv):
+    """--calibrate <percent_used> [--reset <ISO> | --since <ISO>] [--json], which local-llm.ps1 calibrate runs."""
+    try:
+        rest = argv[argv.index("--calibrate") + 1:]
+        if not rest or rest[0].startswith("--"):
+            raise ToolError("Usage: --calibrate <percent_used> [--reset <ISO> | --since <ISO>] [--json]")
+        try:
+            percent = float(rest[0].rstrip("%"))
+        except ValueError:
+            raise ToolError("Not a percentage: {}".format(rest[0]))
+        times = {}
+        for name in ("--since", "--reset"):
+            text = option(argv, name)
+            if text is not None:
+                try:
+                    times[name] = parse_time(text)
+                except ValueError:
+                    raise ToolError("{} is not an ISO time: {}".format(name, text))
+        result = calibrate(percent, times.get("--since"), times.get("--reset"))
+    except ToolError as error:
+        print(error)
+        return 1
+    if "--json" in argv:
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
+    print("Window: {} to {} ({})".format(result["since"], result["until"], result["window"]))
+    print("{} messages, API-rate value by model:".format(result["messages"]))
+    for model, usd in result["usd_by_model"].items():
+        print("  {}: ${:,.2f}".format(model, usd))
+    print("By term: " + ", ".join("{} ${:,.2f}".format(term, usd) for term, usd in result["usd_by_term"].items()))
+    print("Total: ${:,.2f} for {:g}% used, so 1% is about ${:,.2f}".format(
+        result["usd_total"], result["percent_used"], result["usd_per_pct"]))
+    if result["unknown_models"]:
+        print("Warning: unknown models, priced at Opus 5.5 rates: " + ", ".join(result["unknown_models"]))
+    if result["skipped"]:
+        print("Skipped {} unreadable lines or files.".format(result["skipped"]))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--calibrate" in sys.argv[1:]:
+        sys.exit(print_calibration(sys.argv[1:]))
     if "--stats" in sys.argv[1:]:
         sys.exit(print_stats(sys.argv[1:]))
     main()

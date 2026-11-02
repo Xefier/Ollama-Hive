@@ -5,12 +5,14 @@
 #   local-llm list                          (and whether each rig answers now)
 #   local-llm unregister                    (removes every rig and the MCP server itself)
 #   local-llm stats [days] [--json]         (this PC's usage of the local model: calls, tokens saved; days 14)
+#   local-llm calibrate <percent> [--reset <ISO> | --since <ISO>] [--json]
+#                                           (API dollars of this PC's Claude Code usage per 1% of the weekly limit)
 #
 # The rig list lives only in the server's Claude Code registration (its OLLAMA_URLS), which each command rewrites.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page.
 
 param(
-    [Parameter(Position = 0)][ValidateSet('add', 'remove', 'list', 'unregister', 'stats')][string]$Action = 'list',
+    [Parameter(Position = 0)][ValidateSet('add', 'remove', 'list', 'unregister', 'stats', 'calibrate')][string]$Action = 'list',
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$Rigs
 )
 
@@ -93,6 +95,13 @@ function Save-Rigs([string]$claude, [string[]]$urls, $current) {
 if ($Action -eq 'stats') {
     $python = Find-Python
     & $python $server --stats @($Rigs | Where-Object { $_ })
+    exit $LASTEXITCODE
+}
+
+# Reads only Claude Code's transcripts under ~/.claude/projects, so it needs no registration either
+if ($Action -eq 'calibrate') {
+    $python = Find-Python
+    & $python $server --calibrate @($Rigs | Where-Object { $_ })
     exit $LASTEXITCODE
 }
 

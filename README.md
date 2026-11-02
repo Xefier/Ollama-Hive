@@ -97,6 +97,7 @@ cd "I:\Development\Mining\Hive Custom Miners\Ollama-Hive"
 | `local-llm list` | Lists the rigs and whether each answers now (also what a double-click does) |
 | `local-llm unregister` | Removes every rig and the server |
 | `local-llm stats [days] [--json]` | This PC's usage of the local model (see below); `days` defaults to 14 |
+| `local-llm calibrate <percent> [--reset <ISO>] [--json]` | API dollars of this PC's Claude Code usage per 1% of the weekly plan limit (see below) |
 
 It registers for the current Windows user, in every project, and keeps the rig list in that registration only. Rigs are
 tried in the order added: the first with a model loaded is used, so list every rig that might be on this flight sheet.
@@ -120,6 +121,18 @@ answer comes back anyway.
 Sessions read it with the `local_llm_stats` tool: totals, then one line per project and per day for the last `days`
 (default 14); `json: true` returns the aggregate as JSON, with one row per PC, project and day, for a dashboard. From
 the shell, `local-llm stats` prints the same summary (it needs only Python, not a registration).
+
+#### Calibrating the weekly percent
+
+To show the saving as a share of the Claude plan's weekly limit, `local-llm calibrate <percent used> --reset <next reset>`
+(both from the plan's usage card) sums what this PC's Claude Code messages in that week would cost at API list prices,
+read from the transcripts under `~/.claude/projects`, and divides by the percent: `usd_per_pct`, the dollars one percent
+is worth. `--since <ISO>` sets the window start directly; with neither, it uses the last 7 days and says so. `--json`
+gives `since`, `until`, `percent_used`, `usd_total`, `usd_by_model`, `usd_by_term` (input, output, cache reads, 5-minute
+and 1-hour cache writes), `messages`, `usd_per_pct`, `unknown_models` and `skipped`. Cache writes are priced by duration,
+as the transcripts record them: 5-minute at 1.25 x input, 1-hour at 2 x input (1.25 x when a line doesn't say). The
+prices (`CLAUDE_PRICES` in `client/local_llm_mcp.py`) are only a weighting between models; the result is an estimate,
+since the plan's accounting is not published. `dashboard/sync.md` says how it reaches the dashboard.
 
 ## Checks on a rig
 

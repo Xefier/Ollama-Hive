@@ -51,6 +51,7 @@ h1 { font-size: 1.75rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; t
 .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
 .big { font-family: var(--font-data); font-size: 1.7rem; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .tile.lead .big { color: var(--accent); }
+tr.current td { font-weight: 600; }
 .hint { font-size: 0.8rem; color: var(--muted); line-height: 1.35; }
 .price { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); flex-wrap: wrap; }
 .price input { width: 5.5em; font: inherit; font-family: var(--font-data); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; }
@@ -98,9 +99,9 @@ tr:last-child td { border-bottom: 0; }
 
   <div class="tiles" id="tiles">
     <div class="tile lead">
-      <span class="label">Tokens saved</span>
+      <span class="label">Saved this plan week</span>
       <span class="big" id="t-saved">—</span>
-      <span class="hint" id="t-saved-hint">All synced days</span>
+      <span class="hint" id="t-saved-hint">Of the Ultra plan's weekly limit</span>
     </div>
     <div class="tile">
       <span class="label">Tokens read locally</span>
@@ -115,9 +116,21 @@ tr:last-child td { border-bottom: 0; }
     <div class="tile">
       <span class="label">Claude input cost avoided</span>
       <span class="big" id="t-cost">—</span>
-      <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="15"> USD per million input tokens <span class="state" id="price-state"></span></label>
+      <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="4"> USD per million input tokens <span class="state" id="price-state"></span></label>
+      <label class="price" for="usd-pct">1% of the weekly limit = <input id="usd-pct" type="number" min="0" step="0.01" inputmode="decimal" placeholder="?"> USD of API-rate use <span class="state" id="usd-pct-state"></span></label>
     </div>
   </div>
+
+  <section class="card" id="by-week">
+    <div class="card-head">
+      <h2>By plan week</h2>
+      <span class="hint" id="week-hint">Weeks run from one usage reset to the next</span>
+    </div>
+    <table>
+      <thead><tr><th>Week from</th><th>Calls</th><th>Read</th><th>Saved</th><th>Cost avoided</th><th>Of weekly limit</th></tr></thead>
+      <tbody id="weeks"><tr><td colspan="6" class="empty">Weeks appear here after the first sync.</td></tr></tbody>
+    </table>
+  </section>
 
   <section class="card" id="daily-chart">
     <div class="card-head">
@@ -157,7 +170,7 @@ tr:last-child td { border-bottom: 0; }
 
 <script>
 (function () {
-  const DEFAULT_PRICE = 15;
+  const DEFAULT_PRICE = 4; // Claude Opus 5.5 API input rate, USD per million tokens
   let rows = [];
   let info = {};
   let db = null;
@@ -193,15 +206,40 @@ tr:last-child td { border-bottom: 0; }
   };
   const localDay = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 
+  const money = (tokens) => { const c = (tokens / 1e6) * price(); return "$" + c.toFixed(c < 10 ? 2 : 0); };
+  const usdPerPct = () => { const v = Number(info.usd_per_pct); return isFinite(v) && v > 0 ? v : null; };
+  const pct = (tokens) => { const u = usdPerPct(); if (!u) return null; return ((tokens / 1e6) * price()) / u; };
+  const fmtPct = (v) => v === null ? "—" : (v < 10 ? v.toFixed(1) : v.toFixed(0)) + "%";
+  // Plan weeks: anchored to the usage card's reset time (meta.week_reset, ISO), else Monday 00:00 local.
+  // A day row belongs to the week whose window holds that day's local noon.
+  const WEEK_MS = 7 * 24 * 3600 * 1000;
+  const anchor = () => { const d = info.week_reset ? new Date(info.week_reset) : null; return d && isFinite(d) ? d.getTime() : null; };
+  const weekStartMs = (ms) => {
+    const a = anchor();
+    if (a !== null) return a - WEEK_MS * Math.ceil((a - ms) / WEEK_MS);
+    const d = new Date(ms); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime();
+  };
+  const weekOf = (date) => { const [y, m, d] = date.split("-").map(Number); return weekStartMs(new Date(y, m - 1, d, 12).getTime()); };
+  const thisWeek = () => weekStartMs(Date.now());
+  const weekLabel = (ms) => { const d = new Date(ms); return localDay(d) + (anchor() !== null ? " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") : ""); };
+
   function renderTiles() {
     const t = sum(rows);
-    $("t-saved").textContent = rows.length ? fmt(t.saved_tokens) : "—";
+    const cur = thisWeek();
+    const week = sum(rows.filter((r) => weekOf(r.date) === cur));
+    const prev = sum(rows.filter((r) => weekOf(r.date) === cur - WEEK_MS));
+    const wp = pct(week.saved_tokens);
+    $("t-saved").textContent = !rows.length ? "—" : wp !== null ? fmtPct(wp) : fmt(week.saved_tokens);
     $("t-read").textContent = rows.length ? fmt(t.prompt_tokens) : "—";
     $("t-read-hint").textContent = rows.length ? fmt(t.answer_tokens) + " answer tokens came back, " + mb(t.file_bytes) + " of files read" : "Prompt tokens, files included";
     $("t-calls").textContent = rows.length ? t.calls.toLocaleString("en-US") : "—";
     const days = new Set(rows.map((r) => r.date)).size;
     $("t-calls-hint").textContent = rows.length ? "Over " + days + (days === 1 ? " day" : " days") + ", " + new Set(rows.map((r) => r.pc)).size + " PC(s)" : "—";
-    $("t-saved-hint").textContent = rows.length ? "All synced days" : "Waiting for the first sync";
+    $("t-saved-hint").textContent = !rows.length ? "Waiting for the first sync"
+      : (wp !== null ? fmt(week.saved_tokens) + " tokens, " + money(week.saved_tokens) : "Set \"1% of the weekly limit\" below to see a percent")
+        + " · last week " + (pct(prev.saved_tokens) !== null ? fmtPct(pct(prev.saved_tokens)) : fmt(prev.saved_tokens)) + " · all time " + fmt(t.saved_tokens) + " (" + money(t.saved_tokens) + ")";
+    const usd = $("usd-pct");
+    if (document.activeElement !== usd) usd.value = usdPerPct() === null ? "" : String(usdPerPct());
     const cost = (t.saved_tokens / 1e6) * price();
     $("t-cost").textContent = rows.length ? "$" + cost.toFixed(cost < 10 ? 2 : 0) : "—";
     const input = $("price");
@@ -278,29 +316,58 @@ tr:last-child td { border-bottom: 0; }
     box.replaceChildren(svg, tip);
   }
 
+  function renderWeeks() {
+    const body = $("weeks");
+    body.replaceChildren();
+    $("week-hint").textContent = anchor() !== null ? "Weeks run from one usage reset to the next (" + new Date(anchor()).toLocaleString() + ")" : "Monday to Sunday, local time; sync meta.week_reset to follow the plan's reset";
+    if (!rows.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 6; td.className = "empty"; td.textContent = "Weeks appear here after the first sync."; tr.append(td); body.append(tr); return;
+    }
+    const cur = thisWeek();
+    const byWeek = new Map();
+    for (let i = 0; i < 12; i++) byWeek.set(cur - WEEK_MS * i, []);
+    for (const r of rows) { const w = weekOf(r.date); if (byWeek.has(w)) byWeek.get(w).push(r); }
+    for (const [w, list] of byWeek) {
+      const g = sum(list);
+      if (!g.calls && w !== cur) continue;
+      const tr = document.createElement("tr");
+      if (w === cur) tr.className = "current";
+      for (const v of [weekLabel(w) + (w === cur ? " (this week)" : ""), g.calls.toLocaleString("en-US"), fmt(g.prompt_tokens), fmt(g.saved_tokens), money(g.saved_tokens), fmtPct(pct(g.saved_tokens))]) {
+        const td = document.createElement("td"); td.textContent = v; tr.append(td);
+      }
+      body.append(tr);
+    }
+  }
+
   function renderMeta() {
     $("last-sync").textContent = info.last_sync ? new Date(info.last_sync).toLocaleString() : "never";
     $("note").textContent = info.note || "";
   }
 
-  function render() { renderTiles(); renderChart(); renderTable("projects", "project", "No projects synced yet."); renderTable("pcs", "pc", "No PCs synced yet."); renderMeta(); }
+  function render() { renderTiles(); renderWeeks(); renderChart(); renderTable("projects", "project", "No projects synced yet."); renderTable("pcs", "pc", "No PCs synced yet."); renderMeta(); }
 
-  let savedPrice = null;
-  $("price").addEventListener("change", async () => {
-    const v = Number($("price").value);
-    const state = $("price-state");
-    if (!isFinite(v) || v < 0) { state.textContent = "not a price"; return; }
-    info = { ...info, price_per_m: v };
-    render();
-    if (!db) { state.textContent = "not saved"; return; }
-    try {
-      await db.doc("meta/info").set({ ...info, price_per_m: v });
-      state.textContent = "saved";
-    } catch (e) {
-      state.textContent = e && e.code === "invalid_argument" ? "view only" : "not saved";
-    }
-    clearTimeout(savedPrice); savedPrice = setTimeout(() => (state.textContent = ""), 2500);
-  });
+  const timers = {};
+  function bindMetaField(inputId, stateId, key, validate, invalidText) {
+    $(inputId).addEventListener("change", async () => {
+      const raw = $(inputId).value.trim();
+      const v = raw === "" ? null : Number(raw);
+      const state = $(stateId);
+      if (v !== null && !validate(v)) { state.textContent = invalidText; return; }
+      info = { ...info, [key]: v };
+      render();
+      if (!db) { state.textContent = "not saved"; return; }
+      try {
+        await db.doc("meta/info").set({ ...info, [key]: v });
+        state.textContent = "saved";
+      } catch (e) {
+        state.textContent = e && e.code === "invalid_argument" ? "view only" : "not saved";
+      }
+      clearTimeout(timers[key]); timers[key] = setTimeout(() => (state.textContent = ""), 2500);
+    });
+  }
+  bindMetaField("price", "price-state", "price_per_m", (v) => isFinite(v) && v >= 0, "not a price");
+  bindMetaField("usd-pct", "usd-pct-state", "usd_per_pct", (v) => isFinite(v) && v > 0, "must be above 0");
 
   let resizeTimer = null;
   window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderChart, 150); });
@@ -314,7 +381,7 @@ tr:last-child td { border-bottom: 0; }
     try {
       const user = await window.claude.use("user");
       const can = user && user.can ? await user.can("data.write") : null;
-      if (can === false) { $("price").disabled = true; }
+      if (can === false) { $("price").disabled = true; $("usd-pct").disabled = true; }
     } catch (e) {}
   })();
 })();
