@@ -5,21 +5,26 @@ It reads the files itself and returns only the answer, so a file handed to the m
 reading it. Standard library only.
 
 Environment:
-  OLLAMA_URLS       Rigs to try in order, comma separated. Switching a rig's flight sheet takes it out of this list's
-                    reach and the next one that has a model loaded is used.
+  OLLAMA_URLS       The rigs, comma separated. Each request goes to the least busy one (from this PC) that has a model
+                    loaded whose context holds it, and fails over to the others; a rig switched to another flight
+                    sheet just stops answering and is skipped.
   LOCAL_LLM_ROOTS   More folders files may be read from besides the working directory, separated by the OS path
                     separator (local-llm.ps1 adds the Unity editor logs and Claude's scratch folders).
   LOCAL_LLM_STATS   The usage log, one JSON line per call. Default %LOCALAPPDATA%\local-llm\stats.jsonl
                     (~/.local-llm/stats.jsonl where LOCALAPPDATA is not set).
+  LOCAL_LLM_INFLIGHT  The folder of in-flight markers that balance the rigs. Default %LOCALAPPDATA%\local-llm\inflight.
 
 Run directly with --stats [days] [--json] it prints the usage summary instead of serving, and with
 --calibrate <percent_used> [--reset <ISO> | --since <ISO>] [--json] it prices this PC's Claude Code usage (from the
 transcripts under ~/.claude/projects) to find how many API dollars one percent of the weekly subscription limit is.
 """
 
+import concurrent.futures
+import contextlib
 import datetime
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -32,6 +37,11 @@ SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2025-06-18"
 STATUS_TIMEOUT_SECONDS = 3
 ANSWER_TIMEOUT_SECONDS = 900
+RIG_QUERY_TIMEOUT_SECONDS = 2
+# A marker older than any request can last is left over from a crash: it is deleted instead of counted
+MARKER_MAX_AGE_SECONDS = ANSWER_TIMEOUT_SECONDS + 60
+SELECTION_LOCK_WAIT_SECONDS = 2
+SELECTION_LOCK_STALE_SECONDS = 10
 MAX_FILE_BYTES = 2 * 1024 * 1024
 # A cautious estimate for source code, to refuse early rather than have the model silently lose the start of its prompt
 CHARS_PER_TOKEN = 3.0
@@ -104,6 +114,14 @@ class ToolError(Exception):
     pass
 
 
+class RefusedError(ToolError):
+    """No rig with a model loaded has a context that holds the request: never retried on another rig."""
+
+    def __init__(self, message, url, model, context):
+        ToolError.__init__(self, message)
+        self.url, self.model, self.context = url, model, context
+
+
 def urls():
     configured = os.environ.get("OLLAMA_URLS", "http://127.0.0.1:11434")
     return [url.strip().rstrip("/") for url in configured.split(",") if url.strip()]
@@ -121,24 +139,156 @@ def request_json(url, payload=None, timeout=STATUS_TIMEOUT_SECONDS):
         return json.loads(response.read().decode("utf-8"))
 
 
-def loaded_model(url):
+def loaded_model(url, timeout=STATUS_TIMEOUT_SECONDS):
     """The rig's loaded model, or None when it is reachable with nothing loaded. Raises when it is unreachable."""
-    models = request_json(url + "/api/ps").get("models") or []
+    models = request_json(url + "/api/ps", timeout=timeout).get("models") or []
     return models[0] if models else None
 
 
-def find_rig():
-    problems = []
-    for url in urls():
+def host_port(url):
+    return re.sub(r"^[A-Za-z]+://", "", url)
+
+
+def probe_rigs():
+    """[(url, model or None, problem or None)] for every rig in OLLAMA_URLS order, asked in parallel so that any
+    number of rigs costs one round trip."""
+    def probe(url):
         try:
-            model = loaded_model(url)
+            model = loaded_model(url, RIG_QUERY_TIMEOUT_SECONDS)
         except (urllib.error.URLError, OSError, ValueError) as error:
-            problems.append("{}: unreachable ({})".format(url, error))
+            return url, None, "unreachable ({})".format(error)
+        return url, model, None if model else "reachable, no model loaded yet"
+
+    rigs = urls()
+    if not rigs:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(rigs)) as pool:
+        return list(pool.map(probe, rigs))
+
+
+def context_of(model):
+    context = model.get("context_length")
+    return context if isinstance(context, int) and context > 0 else None
+
+
+def fits(model, estimate):
+    context = context_of(model)
+    return context is None or estimate <= context - RESERVED_ANSWER_TOKENS
+
+
+# In-flight markers: one file per request this PC has running on a rig, in inflight\<host_port>\, created before the
+# request and deleted after it. Every Claude session runs its own copy of this server, so files are what lets them see
+# each other's requests. Within one PC the count is exact (choosing a rig and creating its marker happen under one lock);
+# PCs don't see each other's markers, so across PCs the balance is only statistical, from the random tie-break.
+def inflight_root():
+    return os.environ.get("LOCAL_LLM_INFLIGHT") or os.path.join(data_folder(), "inflight")
+
+
+def rig_folder(url):
+    return os.path.join(inflight_root(), re.sub(r"[^A-Za-z0-9.-]", "_", host_port(url)))
+
+
+def inflight(url):
+    """Requests this PC has running on the rig now. Deletes markers too old to be live."""
+    folder = rig_folder(url)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    count, now = 0, time.time()
+    for name in names:
+        if not name.endswith(".marker"):
             continue
-        if model:
-            return url, model
-        problems.append("{}: no model loaded yet".format(url))
-    raise ToolError("No local model is available. " + "; ".join(problems))
+        marker = os.path.join(folder, name)
+        try:
+            if now - os.path.getmtime(marker) > MARKER_MAX_AGE_SECONDS:
+                os.remove(marker)
+                continue
+        except OSError:
+            continue
+        count += 1
+    return count
+
+
+def add_marker(url):
+    """The new marker's path, or None when it can't be written: balancing is a nicety, never a reason to fail."""
+    try:
+        folder = rig_folder(url)
+        os.makedirs(folder, exist_ok=True)
+        marker = os.path.join(folder, "{}-{:08x}.marker".format(os.getpid(), random.getrandbits(32)))
+        with open(marker, "x"):
+            pass
+        return marker
+    except OSError:
+        return None
+
+
+def remove_marker(marker):
+    if marker:
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def selection_lock():
+    """Serialises choosing a rig among this PC's servers, so two choosing at the same moment see each other's marker.
+    Stops waiting after SELECTION_LOCK_WAIT_SECONDS and chooses anyway rather than hold up an answer."""
+    lock = os.path.join(inflight_root(), "select.lock")
+    held = False
+    try:
+        os.makedirs(inflight_root(), exist_ok=True)
+        deadline = time.time() + SELECTION_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                held = True
+                break
+            except (FileExistsError, PermissionError):
+                # PermissionError: Windows, while another holder is deleting it
+                try:
+                    if time.time() - os.path.getmtime(lock) > SELECTION_LOCK_STALE_SECONDS:
+                        os.remove(lock)
+                        continue
+                except OSError:
+                    pass
+                if time.time() > deadline:
+                    break
+                time.sleep(0.02)
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        if held:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+
+
+def choose_rigs(estimate):
+    """The rigs that can take a request of about `estimate` tokens, best first, and the marker already made for the
+    first. Rule: only rigs with a model loaded whose context holds the request; among them the one with the fewest
+    in-flight requests from this PC, ties broken at random; the rest follow in the same order, for failover."""
+    probes = probe_rigs()
+    loaded = [(url, model) for url, model, _problem in probes if model]
+    if not loaded:
+        problems = "; ".join("{}: {}".format(url, problem) for url, _model, problem in probes)
+        raise ToolError("No local model is available. " + (problems or "OLLAMA_URLS lists no rig."))
+    fitting = [(url, model) for url, model in loaded if fits(model, estimate)]
+    if not fitting:
+        url, model = max(loaded, key=lambda rig: context_of(rig[1]))
+        context = context_of(model)
+        raise RefusedError(
+            "About {} tokens would not fit: the largest context available is {} ({} on {}), and the model would lose "
+            "part of it. Send less, or raise num_ctx in the rig's flight sheet.".format(
+                estimate, context, model.get("name"), url), url, model.get("name"), context)
+    with selection_lock():
+        ranked = sorted(fitting, key=lambda rig: (inflight(rig[0]), random.random()))
+        marker = add_marker(ranked[0][0])
+    return ranked, marker
 
 
 def read_file(path):
@@ -155,14 +305,15 @@ def read_file(path):
         raise ToolError("Could not read {}: {}".format(path, error))
 
 
-def stats_path():
-    configured = os.environ.get("LOCAL_LLM_STATS")
-    if configured:
-        return configured
+def data_folder():
     base = os.environ.get("LOCALAPPDATA")
     if base:
-        return os.path.join(base, "local-llm", "stats.jsonl")
-    return os.path.join(os.path.expanduser("~"), ".local-llm", "stats.jsonl")
+        return os.path.join(base, "local-llm")
+    return os.path.join(os.path.expanduser("~"), ".local-llm")
+
+
+def stats_path():
+    return os.environ.get("LOCAL_LLM_STATS") or os.path.join(data_folder(), "stats.jsonl")
 
 
 def project_name():
@@ -211,20 +362,16 @@ def build_prompt(prompt, files):
 
 def status(_arguments):
     lines = []
-    for url in urls():
-        try:
-            model = loaded_model(url)
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            lines.append("{}: unreachable ({})".format(url, error))
-            continue
+    for url, model, problem in probe_rigs():
+        busy = "{} in flight from this PC".format(inflight(url))
         if not model:
-            lines.append("{}: reachable, no model loaded yet".format(url))
+            lines.append("{}: {}; {}".format(url, problem, busy))
             continue
         size = model.get("size") or 0
         on_gpu = 100 * (model.get("size_vram") or 0) // size if size else 0
-        lines.append("{}: {}, context {}, {}% on GPU".format(
-            url, model.get("name"), model.get("context_length", "unknown"), on_gpu))
-    return "\n".join(lines)
+        lines.append("{}: {}, context {}, {}% on GPU; {}".format(
+            url, model.get("name"), model.get("context_length", "unknown"), on_gpu, busy))
+    return "\n".join(lines) or "OLLAMA_URLS lists no rig."
 
 
 def ask(arguments):
@@ -235,73 +382,79 @@ def ask(arguments):
     files = arguments.get("files") or []
     content = build_prompt(prompt, files)
     think = bool(arguments.get("think", False))
-    record = {"rig": None, "model": None, "prompt_tokens": 0, "answer_tokens": 0, "file_bytes": files_size(files),
-              "files": len(files), "think": think, "cut_off": False, "saved_tokens": 0}
+    file_bytes = files_size(files)
+    estimate = int(len(content) / CHARS_PER_TOKEN)
 
-    def failed(**extra):
-        record["seconds"] = round(time.time() - started, 1)
-        record.update(extra)
-        log_call(record)
+    def new_record(url=None, model=None):
+        return {"rig": url, "model": model, "prompt_tokens": 0, "answer_tokens": 0, "file_bytes": file_bytes,
+                "files": len(files), "think": think, "cut_off": False, "saved_tokens": 0}
 
     try:
-        url, model = find_rig()
-    except ToolError:
-        failed(error=True)
+        candidates, marker = choose_rigs(estimate)
+    except RefusedError as error:
+        log_call(dict(new_record(error.url, error.model), seconds=round(time.time() - started, 1), refused=True,
+                      estimate=estimate, context=error.context))
         raise
-    record["rig"] = url
-    record["model"] = model.get("name")
-
-    context = model.get("context_length")
-    if isinstance(context, int) and context > 0:
-        estimate = int(len(content) / CHARS_PER_TOKEN)
-        if estimate > context - RESERVED_ANSWER_TOKENS:
-            failed(refused=True, estimate=estimate, context=context)
-            raise ToolError(
-                "About {} tokens would not fit the model's context of {}, and the model would lose part of it. "
-                "Send less, or raise num_ctx in the rig's flight sheet.".format(estimate, context))
+    except ToolError:
+        log_call(dict(new_record(), seconds=round(time.time() - started, 1), error=True))
+        raise
 
     messages = []
     if arguments.get("system"):
         messages.append({"role": "system", "content": arguments["system"]})
     messages.append({"role": "user", "content": content})
 
-    # No num_ctx here: a different value than the rig's own would make Ollama reload the model
-    payload = {
-        "model": model["name"],
-        "messages": messages,
-        "stream": False,
-        "think": think,
-        "keep_alive": -1,
-    }
-    if arguments.get("max_tokens"):
-        payload["options"] = {"num_predict": int(arguments["max_tokens"])}
-
+    # One stats line per attempt: a failed rig's line has error: true, so per-rig stats show its failures
+    failures = []
     try:
-        reply = request_json(url + "/api/chat", payload, ANSWER_TIMEOUT_SECONDS)
-    except (urllib.error.URLError, OSError, ValueError) as error:
-        failed(error=True)
-        raise ToolError("The request to {} failed: {}".format(url, error))
+        for url, model in candidates:
+            attempt = time.time()
+            name = model.get("name")
+            record = new_record(url, name)
+            # No num_ctx here: a different value than the rig's own would make Ollama reload the model
+            payload = {"model": name, "messages": messages, "stream": False, "think": think, "keep_alive": -1}
+            if arguments.get("max_tokens"):
+                payload["options"] = {"num_predict": int(arguments["max_tokens"])}
+            if marker is None:
+                marker = add_marker(url)
+            try:
+                reply, problem = request_json(url + "/api/chat", payload, ANSWER_TIMEOUT_SECONDS), None
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                reply, problem = None, "request failed ({})".format(error)
+            finally:
+                remove_marker(marker)
+                marker = None
+            answer = ""
+            if reply is not None:
+                record["prompt_tokens"] = reply.get("prompt_eval_count") or 0
+                record["answer_tokens"] = reply.get("eval_count") or 0
+                record["saved_tokens"] = max(0, record["prompt_tokens"] - record["answer_tokens"])
+                record["cut_off"] = reply.get("done_reason") == "length"
+                record["eval_seconds"] = round((reply.get("eval_duration") or 0) / 1e9, 2)
+                answer = (reply.get("message") or {}).get("content", "")
+                if not answer.strip():
+                    problem = "empty answer (done_reason: {})".format(reply.get("done_reason"))
+            record["seconds"] = round(time.time() - attempt, 1)
+            if problem:
+                record["error"] = True
+                log_call(record)
+                failures.append("{} on {}: {}".format(name, url, problem))
+                continue
+            log_call(record)
 
-    record["prompt_tokens"] = reply.get("prompt_eval_count") or 0
-    record["answer_tokens"] = reply.get("eval_count") or 0
-    record["saved_tokens"] = max(0, record["prompt_tokens"] - record["answer_tokens"])
-    record["cut_off"] = reply.get("done_reason") == "length"
-    answer = (reply.get("message") or {}).get("content", "")
-    if not answer.strip():
-        failed(error=True)
-        raise ToolError("{} returned an empty answer (done_reason: {})".format(model["name"], reply.get("done_reason")))
-
-    record["seconds"] = round(time.time() - started, 1)
-    log_call(record)
-
-    seconds = (reply.get("eval_duration") or 0) / 1e9
-    produced = reply.get("eval_count") or 0
-    rate = "{:.0f} tokens/s".format(produced / seconds) if seconds > 0 else "unknown speed"
-    note = "\n\n[{} on {}: {} prompt tokens, {} answer tokens, {}".format(
-        model["name"], url, reply.get("prompt_eval_count", "?"), produced, rate)
-    if reply.get("done_reason") == "length":
-        note += ", CUT OFF at the token limit"
-    return answer + note + "]"
+            produced = reply.get("eval_count") or 0
+            rate = "{:.0f} tokens/s".format(produced / record["eval_seconds"]) if record["eval_seconds"] > 0 \
+                else "unknown speed"
+            note = "\n\n[{} on {}: {} prompt tokens, {} answer tokens, {}".format(
+                name, url, reply.get("prompt_eval_count", "?"), produced, rate)
+            if record["cut_off"]:
+                note += ", CUT OFF at the token limit"
+            if failures:
+                note += "; answered after {} failed: {}".format(len(failures), "; ".join(failures))
+            return answer + note + "]"
+    finally:
+        remove_marker(marker)
+    raise ToolError("Every rig that could take the request failed: " + "; ".join(failures))
 
 
 def row_id(*parts):
@@ -310,6 +463,26 @@ def row_id(*parts):
 
 
 COUNTS = ("calls", "prompt_tokens", "answer_tokens", "saved_tokens", "file_bytes", "refusals", "errors")
+RIG_COUNTS = ("calls", "prompt_tokens", "answer_tokens", "saved_tokens", "seconds")
+
+
+def rig_key(entry):
+    """"<model> @ <host:port>", the key of the per-rig stats (the dashboard sums rows' rigs by it), or None for a call
+    that never reached a rig (none available, or refused for its size: that line names the largest rig, unasked)."""
+    if not entry.get("rig") or not entry.get("model") or entry.get("refused"):
+        return None
+    return "{} @ {}".format(entry["model"], host_port(entry["rig"]))
+
+
+def add_rig(table, key, entry):
+    item = table.setdefault(key, dict.fromkeys(RIG_COUNTS, 0))
+    item["calls"] += 1
+    for name in ("prompt_tokens", "answer_tokens", "saved_tokens"):
+        value = entry.get(name) or 0
+        item[name] += value if isinstance(value, int) else 0
+    seconds = entry.get("seconds") or 0
+    item["seconds"] = round(item["seconds"] + (seconds if isinstance(seconds, (int, float)) else 0), 1)
+    return item
 
 
 def read_log():
@@ -342,7 +515,7 @@ def aggregate(days):
     Days are the logging PC's local dates."""
     first_day = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
     totals = dict.fromkeys(COUNTS, 0)
-    projects, dates, rows = {}, {}, {}
+    projects, dates, rows, rigs, speeds = {}, {}, {}, {}, {}
     for entry in read_log():
         add_entry(totals, entry)
         date = str(entry.get("day") or entry["ts"])[:10]
@@ -351,15 +524,28 @@ def aggregate(days):
         pc, project = entry.get("pc") or "?", entry.get("project") or "?"
         for table, key, fields in ((projects, project, {"project": project}), (dates, date, {"date": date}),
                                    (rows, row_id(pc, project, date),
-                                    {"pc": pc, "project": project, "date": date})):
+                                    {"pc": pc, "project": project, "date": date, "rigs": {}})):
             if key not in table:
                 table[key] = dict(fields, **dict.fromkeys(COUNTS, 0))
             add_entry(table[key], entry)
+        rig = rig_key(entry)
+        if rig:
+            add_rig(rows[row_id(pc, project, date)]["rigs"], rig, entry)
+            add_rig(rigs, rig, entry)
+            # Generation speed from the calls that logged it (eval_seconds: lines before it was added don't have it)
+            eval_seconds = entry.get("eval_seconds")
+            if isinstance(eval_seconds, (int, float)) and eval_seconds > 0 and not entry.get("error"):
+                speed = speeds.setdefault(rig, [0, 0.0])
+                speed[0] += entry.get("answer_tokens") or 0
+                speed[1] += eval_seconds
+    for rig, (tokens, seconds) in speeds.items():
+        rigs[rig]["tokens_per_second"] = round(tokens / seconds, 1)
     return {
         "file": stats_path(), "days": days, "since": first_day, "totals": totals,
         "projects": sorted(projects.values(), key=lambda item: -item["saved_tokens"]),
         "dates": [dates[key] for key in sorted(dates)],
         "rows": [dict(rows[key], id=key) for key in sorted(rows)],
+        "rigs": [dict(rigs[key], rig=key) for key in sorted(rigs, key=lambda key: -rigs[key]["calls"])],
     }
 
 
@@ -396,6 +582,11 @@ def stats(arguments):
     lines += ["  {}: {}".format(item["project"], describe(item)) for item in summary["projects"]] or ["  none"]
     lines.append("By day:")
     lines += ["  {}: {}".format(item["date"], describe(item)) for item in summary["dates"]] or ["  none"]
+    lines.append("By model @ rig:")
+    lines += ["  {}: {} calls, {} read, {} saved, {}".format(
+        item["rig"], item["calls"], short(item["prompt_tokens"]), short(item["saved_tokens"]),
+        "{:.0f} tokens/s".format(item["tokens_per_second"]) if "tokens_per_second" in item else "speed unknown")
+        for item in summary["rigs"]] or ["  none"]
     return "\n".join(lines)
 
 

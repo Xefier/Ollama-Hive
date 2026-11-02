@@ -7,7 +7,9 @@
 3. From the JSON's `rows`, keep the ones that are new or whose counts differ from the listed doc (usually today and yesterday).
 4. One `ArtifactData` `batch` (max 50 writes; split if more):
    - per kept row: `{op: "set", collection: "daily", doc_id: row.id, data: row minus "id", if_version: <listed version, omit if new>}`
-     (fields: pc, project, date, calls, prompt_tokens, answer_tokens, saved_tokens, file_bytes, refusals, errors)
+     (fields: pc, project, date, calls, prompt_tokens, answer_tokens, saved_tokens, file_bytes, refusals, errors, rigs;
+     `rigs` is an object keyed `"<model> @ <host:port>"` with calls, prompt_tokens, answer_tokens, saved_tokens and
+     seconds per rig; compare it too when deciding whether a row changed)
    - `{op: "update", collection: "meta", doc_id: "info", data: {last_sync: <now, ISO UTC>, note: <short note>}, if_version: <version>}`
      (`update`, not `set`: it keeps `price_per_m`, which people change on the page).
 5. A batch refused for a changed version: re-list and redo only those entries. Rows of other PCs are never touched:

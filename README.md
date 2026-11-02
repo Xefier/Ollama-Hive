@@ -99,8 +99,29 @@ cd "I:\Development\Mining\Hive Custom Miners\Ollama-Hive"
 | `local-llm stats [days] [--json]` | This PC's usage of the local model (see below); `days` defaults to 14 |
 | `local-llm calibrate <percent> [--reset <ISO>] [--json]` | API dollars of this PC's Claude Code usage per 1% of the weekly plan limit (see below) |
 
-It registers for the current Windows user, in every project, and keeps the rig list in that registration only. Rigs are
-tried in the order added: the first with a model loaded is used, so list every rig that might be on this flight sheet.
+It registers for the current Windows user, in every project, and keeps the rig list in that registration only. List
+every rig that might be on this flight sheet: a rig switched to another flight sheet simply stops answering and is
+skipped.
+
+### Which rig answers
+
+Each `local_llm_ask` asks every registered rig at once what it has loaded (2 s timeout each, so any number of rigs costs
+one round trip). Rigs that don't answer or have no model loaded are dropped, and so are those whose context can't hold
+the request (the same estimate as the refusal: about 3 characters per token, plus 2048 tokens kept for the answer). If
+rigs have a model but none fits, the call is refused and the message names the largest context available. Of the rest,
+the one with the fewest requests in flight from this PC is chosen, ties broken at random.
+
+In-flight requests are counted from marker files, one per request, in `%LOCALAPPDATA%\local-llm\inflight\<host_port>\`
+(`LOCAL_LLM_INFLIGHT` overrides the folder), created before the request and deleted after it, also when it fails. A
+marker older than the answer timeout plus a minute is left over from a crash and is deleted rather than counted.
+Choosing a rig and creating its marker happen under one lock file, so the sessions of one PC (each runs its own copy of
+the client) balance exactly; PCs don't see each other's markers, so across PCs the balance is only statistical, from the
+random tie-break.
+
+If the chosen rig fails (no connection, an HTTP error, a broken reply or an empty answer), the next one in the same
+order is tried before giving up; the answer's footer names the rig that answered and the ones that failed. A refusal for
+size is never retried. `local_llm_status` shows each rig's in-flight count from this PC.
+
 New sessions get `local_llm_status`, `local_llm_ask` and `local_llm_stats`. The client reads files from the session's folder, the Unity
 editor logs (`%LOCALAPPDATA%\Unity\Editor`) and Claude's scratch folders (`%LOCALAPPDATA%\Temp\claude`), and nowhere
 else; after pulling a client change, run `add` again so the registration picks it up. The registration points at this clone's
@@ -114,12 +135,17 @@ one JSON line per call in `%LOCALAPPDATA%\local-llm\stats.jsonl` (`~/.local-llm/
 `LOCAL_LLM_STATS` environment variable overrides it). A line holds the time (`ts`, UTC, and `day`, the PC's own date),
 `pc`, `project` (the folder of `CLAUDE_PROJECT_DIR`, else of the working directory), `rig`, `model`, `prompt_tokens`,
 `answer_tokens`, `saved_tokens` (prompt minus answer, never below 0: the answer still enters Claude's context),
-`file_bytes`, `files`, `seconds`, `think` and `cut_off`. A request that failed has `error: true`, and one refused for
-not fitting the context has `refused: true` with its `estimate` and the rig's `context`. If the log can't be written the
+`file_bytes`, `files`, `seconds`, `eval_seconds` (the rig's generation time), `think` and `cut_off`. Each attempt
+on a rig is its own line: a request that failed has `error: true` (after a failover, the rig that failed has that line and
+the rig that answered the next), and one refused for not fitting any context has `refused: true` with its `estimate` and
+the largest `context` available, and names that rig. If the log can't be written the
 answer comes back anyway.
 
 Sessions read it with the `local_llm_stats` tool: totals, then one line per project and per day for the last `days`
-(default 14); `json: true` returns the aggregate as JSON, with one row per PC, project and day, for a dashboard. From
+(default 14), then one per model and rig (calls, tokens read and saved, generation speed in tokens/s); `json: true`
+returns the aggregate as JSON, with one row per PC, project and day, for a dashboard. Each row has `rigs`, an object keyed
+`"<model> @ <host:port>"` with `calls`, `prompt_tokens`, `answer_tokens`, `saved_tokens` and `seconds` for that rig (calls
+refused for size, and calls with no rig available, are in the row's counts but no rig's). From
 the shell, `local-llm stats` prints the same summary (it needs only Python, not a registration).
 
 #### Calibrating the weekly percent

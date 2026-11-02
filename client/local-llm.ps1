@@ -113,7 +113,7 @@ $list = @($current | Where-Object { $_ })
 switch ($Action) {
     'list' {
         if ($null -eq $current) { Write-Host "$name is not registered for $env:USERNAME."; exit 0 }
-        Write-Host "$name rigs for $env:USERNAME, tried in this order:"
+        Write-Host "$name rigs for $env:USERNAME (each request goes to the least busy one that fits):"
         Show-Rigs $list
     }
     'add' {
@@ -123,7 +123,7 @@ switch ($Action) {
             if ($list -contains $url) { Write-Host "$url is already registered." } else { $list += $url }
         }
         Save-Rigs $claude $list $current
-        Write-Host "$name rigs for $env:USERNAME, tried in this order:"
+        Write-Host "$name rigs for $env:USERNAME (each request goes to the least busy one that fits):"
         Show-Rigs $list
         if ($null -eq $current) { Write-Host 'New Claude Code sessions get local_llm_ask and local_llm_status; sessions already open do not.' }
     }
@@ -135,7 +135,7 @@ switch ($Action) {
             if ($list -contains $url) { $list = @($list | Where-Object { $_ -ne $url }) } else { Write-Host "$url was not registered." }
         }
         Save-Rigs $claude $list $current
-        if ($list) { Write-Host "$name rigs for $env:USERNAME, tried in this order:"; Show-Rigs $list }
+        if ($list) { Write-Host "$name rigs for $env:USERNAME (each request goes to the least busy one that fits):"; Show-Rigs $list }
     }
     'unregister' {
         if ($null -eq $current) { Write-Host "$name was not registered for $env:USERNAME."; exit 0 }
