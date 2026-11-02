@@ -75,14 +75,24 @@ you switch away. Fan control stays with Hive.
 
 ## Connecting Claude
 
-On each worker PC, register the client once for all projects (Python 3.8 or newer; nothing to install):
+On each worker PC, clone or pull this repo, then add the rigs from its `client` folder (needs Claude Code and Python 3.8
+or newer; nothing to install):
 
 ```bash
-claude mcp add --scope user --env OLLAMA_URLS=http://192.168.1.50:11434,http://192.168.1.51:11434 local-llm -- python "I:\Development\Mining\Hive Custom Miners\Ollama-Hive\client\local_llm_mcp.py"
+client\local-llm add 192.168.1.189
 ```
 
-List every rig that might be on this flight sheet: the first with a model loaded is used. Sessions get `local_llm_status`
-and `local_llm_ask`. Files are read on the worker PC, only from the session's working directory unless `LOCAL_LLM_ROOTS`
+| Command | Does |
+|---|---|
+| `local-llm add <address>[:port] ...` | Adds rigs; port 11434 unless given. Registers the MCP server on first use |
+| `local-llm remove <address>[:port] ...` | Removes rigs; removing the last one unregisters the server |
+| `local-llm list` | Lists the rigs and whether each answers now (also what a double-click does) |
+| `local-llm unregister` | Removes every rig and the server |
+
+It registers for the current Windows user, in every project, and keeps the rig list in that registration only. Rigs are
+tried in the order added: the first with a model loaded is used, so list every rig that might be on this flight sheet.
+New sessions get `local_llm_status` and `local_llm_ask`. The registration points at this clone's
+`client\local_llm_mcp.py`, so a pull updates the client too; after moving the clone, run `add` again. Files are read on the worker PC, only from the session's working directory unless `LOCAL_LLM_ROOTS`
 says otherwise, and go to the rig over plain HTTP on your LAN.
 
 ## Checks on a rig
