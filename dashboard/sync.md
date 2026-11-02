@@ -34,3 +34,10 @@ It is an estimate: the plan's accounting is not published, and only this PC's Cl
 or claude.ai chats on the same plan make 1% look cheaper than it is; calibrate from the PC that does most of the work).
 A calibration early in the week, at a low percent, is noisy: prefer one late in the week. Recalibrate when it drifts,
 e.g. once a month or after a plan or price change.
+
+### Reference calibration
+
+Plan week of 2026-10-25 (reset Saturdays 11:59:59 UTC), measured 2026-10-30 22:30 UTC at **99%** of the Ultra
+weekly limit: **$4,187** of API-rate use from this PC's Claude Code transcripts (48,869 calls; 98% of the tokens were
+cache reads), so **1% = $42.29**. The following 7 days came to $4,341, which agrees. A reading taken early in a week
+(17 h in: $323 at 32%, $10.09 per 1%) did not, so calibrate late in the week, never early.
