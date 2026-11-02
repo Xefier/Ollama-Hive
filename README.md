@@ -99,7 +99,9 @@ cd "I:\Development\Mining\Hive Custom Miners\Ollama-Hive"
 
 It registers for the current Windows user, in every project, and keeps the rig list in that registration only. Rigs are
 tried in the order added: the first with a model loaded is used, so list every rig that might be on this flight sheet.
-New sessions get `local_llm_status` and `local_llm_ask`. The registration points at this clone's
+New sessions get `local_llm_status` and `local_llm_ask`. The client reads files from the session's folder, the Unity
+editor logs (`%LOCALAPPDATA%\Unity\Editor`) and Claude's scratch folders (`%LOCALAPPDATA%\Temp\claude`), and nowhere
+else; after pulling a client change, run `add` again so the registration picks it up. The registration points at this clone's
 `client\local_llm_mcp.py`, so a pull updates the client too; after moving the clone, run `add` again. Files are read on the worker PC, only from the session's working directory unless `LOCAL_LLM_ROOTS`
 says otherwise, and go to the rig over plain HTTP on your LAN.
 

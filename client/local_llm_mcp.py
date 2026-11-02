@@ -7,7 +7,8 @@ reading it. Standard library only.
 Environment:
   OLLAMA_URLS       Rigs to try in order, comma separated. Switching a rig's flight sheet takes it out of this list's
                     reach and the next one that has a model loaded is used.
-  LOCAL_LLM_ROOTS   Folders files may be read from, separated by the OS path separator. Default: the working directory.
+  LOCAL_LLM_ROOTS   More folders files may be read from besides the working directory, separated by the OS path
+                    separator (local-llm.ps1 adds the Unity editor logs and Claude's scratch folders).
 """
 
 import json
@@ -65,9 +66,8 @@ def urls():
 
 
 def roots():
-    configured = os.environ.get("LOCAL_LLM_ROOTS")
-    folders = configured.split(os.pathsep) if configured else [os.getcwd()]
-    return [os.path.realpath(folder) for folder in folders if folder]
+    folders = [os.getcwd()] + os.environ.get("LOCAL_LLM_ROOTS", "").split(os.pathsep)
+    return [os.path.realpath(os.path.expandvars(folder)) for folder in folders if folder]
 
 
 def request_json(url, payload=None, timeout=STATUS_TIMEOUT_SECONDS):

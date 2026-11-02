@@ -82,7 +82,9 @@ function Save-Rigs([string]$claude, [string[]]$urls, $current) {
         return
     }
     $python = Find-Python
-    $output = & $claude mcp add $name --scope user -e "OLLAMA_URLS=$($urls -join ',')" -- $python $server 2>&1 | Out-String
+    # Besides the session's own folder: the Unity editor logs, and Claude's scratch folders where excerpts of them go
+    $extraRoots = @((Join-Path $env:LOCALAPPDATA 'Unity\Editor'), (Join-Path $env:LOCALAPPDATA 'Temp\claude')) -join ';'
+    $output = & $claude mcp add $name --scope user -e "OLLAMA_URLS=$($urls -join ',')" -e "LOCAL_LLM_ROOTS=$extraRoots" -- $python $server 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "claude mcp add failed: $output" }
 }
 
