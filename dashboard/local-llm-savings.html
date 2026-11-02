@@ -157,6 +157,17 @@ tr:last-child td { border-bottom: 0; }
     </section>
   </div>
 
+  <section class="card" id="by-rig">
+    <div class="card-head">
+      <h2>By model and rig</h2>
+      <span class="hint">Where the reading ran; share of calls shows the load balance</span>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Model @ rig</th><th>Calls</th><th>Share</th><th>Read</th><th>Saved</th><th>Tokens/s</th></tr></thead>
+      <tbody id="rigs"><tr><td colspan="6" class="empty">Rows synced by the current client carry a per-rig breakdown.</td></tr></tbody>
+    </table></div>
+  </section>
+
   <section class="card" id="health">
     <h2>Refusals and errors</h2>
     <div class="health">
@@ -267,6 +278,34 @@ tr:last-child td { border-bottom: 0; }
     }));
   }
 
+  function renderRigs() {
+    const body = $("rigs");
+    const m = new Map();
+    for (const r of rows) {
+      const rigs = r.rigs && typeof r.rigs === "object" ? r.rigs : {};
+      for (const name in rigs) {
+        const s = rigs[name] || {}, g = m.get(name) || { calls: 0, prompt_tokens: 0, answer_tokens: 0, saved_tokens: 0, seconds: 0 };
+        for (const f in g) g[f] += num(s[f]);
+        m.set(name, g);
+      }
+    }
+    const groups = [...m].map(([name, g]) => ({ name, ...g })).sort((a, b) => b.calls - a.calls);
+    if (!groups.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 6; td.className = "empty"; td.textContent = "Rows synced by the current client carry a per-rig breakdown.";
+      tr.append(td); body.replaceChildren(tr); return;
+    }
+    const total = groups.reduce((n, g) => n + g.calls, 0) || 1;
+    body.replaceChildren(...groups.map((g) => {
+      const tr = document.createElement("tr");
+      const rate = g.seconds > 0 ? Math.round(g.answer_tokens / g.seconds) + "" : "—";
+      for (const v of [g.name, g.calls.toLocaleString("en-US"), Math.round(100 * g.calls / total) + "%", fmt(g.prompt_tokens), fmt(g.saved_tokens), rate]) {
+        const td = document.createElement("td"); td.textContent = v; tr.append(td);
+      }
+      return tr;
+    }));
+  }
+
   function renderChart() {
     const box = $("chart");
     const today = new Date();
@@ -352,7 +391,7 @@ tr:last-child td { border-bottom: 0; }
     $("note").textContent = info.note || "";
   }
 
-  function render() { renderTiles(); renderWeeks(); renderChart(); renderTable("projects", "project", "No projects synced yet."); renderTable("pcs", "pc", "No PCs synced yet."); renderMeta(); }
+  function render() { renderTiles(); renderWeeks(); renderChart(); renderTable("projects", "project", "No projects synced yet."); renderTable("pcs", "pc", "No PCs synced yet."); renderRigs(); renderMeta(); }
 
   const timers = {};
   function bindMetaField(inputId, stateId, key, validate, invalidText) {
