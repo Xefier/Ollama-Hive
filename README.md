@@ -129,10 +129,15 @@ To show the saving as a share of the Claude plan's weekly limit, `local-llm cali
 read from the transcripts under `~/.claude/projects`, and divides by the percent: `usd_per_pct`, the dollars one percent
 is worth. `--since <ISO>` sets the window start directly; with neither, it uses the last 7 days and says so. `--json`
 gives `since`, `until`, `percent_used`, `usd_total`, `usd_by_model`, `usd_by_term` (input, output, cache reads, 5-minute
-and 1-hour cache writes), `messages`, `usd_per_pct`, `unknown_models` and `skipped`. Cache writes are priced by duration,
+and 1-hour cache writes), `cache_write_tokens`, `cache_read_tokens`, `reads_per_written_token`,
+`usd_per_m_in_context`, `messages`, `usd_per_pct`, `unknown_models` and `skipped`. Cache writes are priced by duration,
 as the transcripts record them: 5-minute at 1.25 x input, 1-hour at 2 x input (1.25 x when a line doesn't say). The
 prices (`CLAUDE_PRICES` in `client/local_llm_mcp.py`) are only a weighting between models; the result is an estimate,
-since the plan's accounting is not published. `dashboard/sync.md` says how it reaches the dashboard.
+since the plan's accounting is not published. `usd_per_m_in_context` is what a million tokens entering Claude's
+context really cost over the window: cache-write plus cache-read dollars per million tokens written, since each token is
+written to the cache once and re-read on every later turn (`reads_per_written_token` says how often). It is the value of
+a million tokens the local model read instead, so it sets the dashboard's price per million. `dashboard/sync.md` says
+how both numbers reach the dashboard.
 
 ## Checks on a rig
 

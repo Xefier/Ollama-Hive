@@ -498,6 +498,7 @@ def calibrate(percent_used, since=None, reset=None):
     until = min(now, reset) if reset is not None and reset > since else now
     messages, skipped = claude_usage(since, until)
     by_model, by_term, unknown, total, counted = {}, dict.fromkeys(TERMS, 0.0), set(), 0.0, 0
+    token_totals = dict.fromkeys(TERMS, 0)
     for model, *tokens in messages.values():
         if not any(tokens):
             continue  # "<synthetic>" error messages and the like
@@ -507,16 +508,27 @@ def calibrate(percent_used, since=None, reset=None):
         rates = price + (price[0] * CACHE_WRITE_1H_FACTOR,)
         usd = 0.0
         for term, count, rate in zip(TERMS, tokens, rates):
+            token_totals[term] += count
             by_term[term] += count * rate / 1e6
             usd += count * rate / 1e6
         by_model[model] = by_model.get(model, 0.0) + usd
         total += usd
         counted += 1
+    # What a million tokens entering Claude's context really cost over the window: each is written to the cache once
+    # and then re-read on every later turn of the session, so it is priced as (cache write + cache read dollars) per
+    # million tokens written. That is the value of a million tokens the local model read instead, and what the
+    # dashboard's price field (meta.price_per_m) should be set to.
+    written = token_totals["cache_write_5m"] + token_totals["cache_write_1h"]
+    read = token_totals["cache_read"]
+    cache_usd = by_term["cache_write_5m"] + by_term["cache_write_1h"] + by_term["cache_read"]
     return {
         "since": iso(since), "until": iso(until), "window": window, "percent_used": percent_used,
         "usd_total": round(total, 2),
         "usd_by_model": {model: round(usd, 2) for model, usd in sorted(by_model.items(), key=lambda item: -item[1])},
         "usd_by_term": {term: round(usd, 2) for term, usd in by_term.items()},
+        "cache_write_tokens": written, "cache_read_tokens": read,
+        "reads_per_written_token": round(read / written, 2) if written else None,
+        "usd_per_m_in_context": round(cache_usd / (written / 1e6), 2) if written else None,
         "messages": counted, "usd_per_pct": round(total / percent_used, 4),
         "unknown_models": sorted(unknown), "skipped": skipped,
     }
@@ -622,6 +634,12 @@ def print_calibration(argv):
     for model, usd in result["usd_by_model"].items():
         print("  {}: ${:,.2f}".format(model, usd))
     print("By term: " + ", ".join("{} ${:,.2f}".format(term, usd) for term, usd in result["usd_by_term"].items()))
+    if result["cache_write_tokens"]:
+        print("Context: {} tokens written to the cache, {} read back ({:.1f} reads per written token), so a million "
+              "tokens entering Claude's context cost ${:,.2f} over the window, written once and re-read on every later "
+              "turn. That is the value of a million tokens the local model read instead: set the dashboard's "
+              "price_per_m to it.".format(short(result["cache_write_tokens"]), short(result["cache_read_tokens"]),
+                                          result["reads_per_written_token"], result["usd_per_m_in_context"]))
     print("Total: ${:,.2f} for {:g}% used, so 1% is about ${:,.2f}".format(
         result["usd_total"], result["percent_used"], result["usd_per_pct"]))
     if result["unknown_models"]:

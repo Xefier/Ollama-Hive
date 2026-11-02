@@ -28,7 +28,11 @@ as a weighting across models):
    and returns `usd_per_pct` (total dollars / percent used). Check `unknown_models` is empty (unknown ids are priced as
    Opus 5.5) and `messages` is not 0.
 3. In the same `ArtifactData` `batch` as the sync (or alone): `{op: "update", collection: "meta", doc_id: "info",
-   data: {usd_per_pct: <result.usd_per_pct>, week_reset: <resetsAt>}, if_version: <version>}`. The page uses both.
+   data: {usd_per_pct: <result.usd_per_pct>, week_reset: <resetsAt>, price_per_m: <result.usd_per_m_in_context>},
+   if_version: <version>}`. The page uses all three. `usd_per_m_in_context` is what a million tokens entering Claude's
+   context cost over the window (written to the cache once, then re-read on every later turn: cache-write plus
+   cache-read dollars per million written), so it is the value of a million tokens the local model read instead.
+   Skip `price_per_m` when it is null (no cache writes in the window).
 
 It is an estimate: the plan's accounting is not published, and only this PC's Claude Code usage is counted (another PC
 or claude.ai chats on the same plan make 1% look cheaper than it is; calibrate from the PC that does most of the work).

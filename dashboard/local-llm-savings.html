@@ -92,7 +92,7 @@ tr:last-child td { border-bottom: 0; }
   <header>
     <div>
       <h1>Local LLM Savings</h1>
-      <p class="sub">Tokens the local Ollama model read so Claude did not. Saved tokens are prompt tokens minus answer tokens: the answer still enters Claude's context.</p>
+      <p class="sub">Tokens the local Ollama model read so Claude did not. Saved tokens are prompt tokens minus answer tokens: the answer still enters Claude's context. A token kept out of context is written to the cache once and re-read on every later turn, so it is valued at what a million tokens in context cost over a measured week, not the one-time input rate.</p>
     </div>
     <div class="sync" id="sync">Last sync <b id="last-sync">—</b></div>
   </header>
@@ -114,9 +114,9 @@ tr:last-child td { border-bottom: 0; }
       <span class="hint" id="t-calls-hint">—</span>
     </div>
     <div class="tile">
-      <span class="label">Claude input cost avoided</span>
+      <span class="label">Claude cost avoided</span>
       <span class="big" id="t-cost">—</span>
-      <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="4"> USD per million input tokens <span class="state" id="price-state"></span></label>
+      <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="20"> USD per million tokens in context <span class="state" id="price-state"></span></label>
       <label class="price" for="usd-pct">1% of the weekly limit = <input id="usd-pct" type="number" min="0" step="0.01" inputmode="decimal" placeholder="?"> USD of API-rate use <span class="state" id="usd-pct-state"></span></label>
     </div>
   </div>
@@ -170,7 +170,7 @@ tr:last-child td { border-bottom: 0; }
 
 <script>
 (function () {
-  const DEFAULT_PRICE = 4; // Claude Opus 5.5 API input rate, USD per million tokens
+  const DEFAULT_PRICE = 20; // USD per million tokens entering Claude's context: cache write + every later cache read, measured over the 99% week of 2026-10-25 (local-llm calibrate: usd_per_m_in_context)
   let rows = [];
   let info = {};
   let db = null;
