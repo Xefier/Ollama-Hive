@@ -1,0 +1,321 @@
+<meta charset="utf-8">
+<title>Local LLM Savings</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column ledger; headline tiles, a 30-day bar strip, then two tables side by side that stack on a phone */
+:root {
+  --bg: #f3f6f7;
+  --panel: #ffffff;
+  --fg: #14232b;
+  --muted: #5b6d75;
+  --line: #d7e1e5;
+  --accent: #0d6f8a;
+  --accent-soft: #cfe7ee;
+  --warn: #a85b00;
+  --bad: #b3261e;
+  --ok: #2f7d4a;
+  --font-body: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1518; --panel: #142126; --fg: #e3ecef; --muted: #8fa3ab; --line: #24363d;
+    --accent: #56b8d4; --accent-soft: #1b3a44; --warn: #e3a04f; --bad: #f08a80; --ok: #6cc28a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1518; --panel: #142126; --fg: #e3ecef; --muted: #8fa3ab; --line: #24363d;
+  --accent: #56b8d4; --accent-soft: #1b3a44; --warn: #e3a04f; --bad: #f08a80; --ok: #6cc28a;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); }
+.wrap {
+  max-width: 1080px; margin: 0 auto;
+  padding-block: 28px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 22px;
+}
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 8px 24px; }
+h1 { font-size: 1.75rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+.sub { color: var(--muted); margin: 4px 0 0; max-width: 62ch; line-height: 1.45; }
+.sync { font-family: var(--font-data); font-size: 0.8rem; color: var(--muted); text-align: right; }
+.sync b { color: var(--fg); font-weight: 500; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 820px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 6px; min-width: 0; }
+.tile.lead { border-color: var(--accent); }
+.label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.big { font-family: var(--font-data); font-size: 1.7rem; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.tile.lead .big { color: var(--accent); }
+.hint { font-size: 0.8rem; color: var(--muted); line-height: 1.35; }
+.price { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); flex-wrap: wrap; }
+.price input { width: 5.5em; font: inherit; font-family: var(--font-data); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; }
+.price input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.price .state { min-width: 4em; }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; display: grid; gap: 10px; }
+h2 { font-size: 1rem; margin: 0; font-weight: 700; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart text { fill: var(--muted); font-family: var(--font-data); font-size: 10px; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .bar { fill: var(--accent); pointer-events: none; }
+.chart .bar.zero { fill: var(--line); }
+.chart .hit { fill: transparent; cursor: default; }
+.chart .hit:hover + .bar, .chart .bar.on { fill: var(--fg); }
+.tip { position: absolute; pointer-events: none; background: var(--fg); color: var(--bg); font-family: var(--font-data); font-size: 0.75rem; padding: 6px 8px; border-radius: 4px; white-space: nowrap; transform: translate(-50%, -110%); }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 760px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: right; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); font-family: var(--font-data); font-variant-numeric: tabular-nums; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; font-family: var(--font-body); }
+td:first-child { font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+tr:last-child td { border-bottom: 0; }
+.health { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; font-size: 0.85rem; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-data); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.pill.warn::before { background: var(--warn); }
+.pill.bad::before { background: var(--bad); }
+.note { color: var(--muted); font-size: 0.8rem; line-height: 1.45; max-width: 75ch; }
+.empty { color: var(--muted); font-size: 0.9rem; padding: 18px 0; }
+@media (prefers-reduced-motion: no-preference) { .bar { transition: fill .12s; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Local LLM Savings</h1>
+      <p class="sub">Tokens the local Ollama model read so Claude did not. Saved tokens are prompt tokens minus answer tokens: the answer still enters Claude's context.</p>
+    </div>
+    <div class="sync" id="sync">Last sync <b id="last-sync">—</b></div>
+  </header>
+
+  <div class="tiles" id="tiles">
+    <div class="tile lead">
+      <span class="label">Tokens saved</span>
+      <span class="big" id="t-saved">—</span>
+      <span class="hint" id="t-saved-hint">All synced days</span>
+    </div>
+    <div class="tile">
+      <span class="label">Tokens read locally</span>
+      <span class="big" id="t-read">—</span>
+      <span class="hint" id="t-read-hint">Prompt tokens, files included</span>
+    </div>
+    <div class="tile">
+      <span class="label">Calls</span>
+      <span class="big" id="t-calls">—</span>
+      <span class="hint" id="t-calls-hint">—</span>
+    </div>
+    <div class="tile">
+      <span class="label">Claude input cost avoided</span>
+      <span class="big" id="t-cost">—</span>
+      <label class="price" for="price">At <input id="price" type="number" min="0" step="0.01" inputmode="decimal" value="15"> USD per million input tokens <span class="state" id="price-state"></span></label>
+    </div>
+  </div>
+
+  <section class="card" id="daily-chart">
+    <div class="card-head">
+      <h2>Saved tokens per day</h2>
+      <span class="hint" id="chart-range">Last 30 days</span>
+    </div>
+    <div class="chart" id="chart"><p class="empty">Days appear here after the first sync.</p></div>
+  </section>
+
+  <div class="pair">
+    <section class="card" id="by-project">
+      <h2>By project</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Project</th><th>Calls</th><th>Read</th><th>Saved</th><th>Files</th></tr></thead>
+        <tbody id="projects"><tr><td colspan="5" class="empty">No projects synced yet.</td></tr></tbody>
+      </table></div>
+    </section>
+    <section class="card" id="by-pc">
+      <h2>By PC</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>PC</th><th>Calls</th><th>Read</th><th>Saved</th><th>Files</th></tr></thead>
+        <tbody id="pcs"><tr><td colspan="5" class="empty">No PCs synced yet.</td></tr></tbody>
+      </table></div>
+    </section>
+  </div>
+
+  <section class="card" id="health">
+    <h2>Refusals and errors</h2>
+    <div class="health">
+      <span class="pill" id="refusals">— refused</span>
+      <span class="pill" id="errors">— errors</span>
+      <span class="hint">A refusal means the files would not fit the model's context; an error is a failed or empty reply, or no rig with a model loaded.</span>
+    </div>
+    <p class="note" id="note"></p>
+  </section>
+</div>
+
+<script>
+(function () {
+  const DEFAULT_PRICE = 15;
+  let rows = [];
+  let info = {};
+  let db = null;
+
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => {
+    const a = Math.abs(n);
+    if (a >= 1e9) return (n / 1e9).toFixed(2) + "G";
+    if (a >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (a >= 1e4) return (n / 1e3).toFixed(1) + "k";
+    return Math.round(n).toLocaleString("en-US");
+  };
+  const mb = (b) => (b / 1e6).toFixed(b >= 1e7 ? 0 : 2) + " MB";
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : Number(v) || 0);
+  const FIELDS = ["calls", "prompt_tokens", "answer_tokens", "saved_tokens", "file_bytes", "refusals", "errors"];
+  const sum = (list) => {
+    const t = Object.fromEntries(FIELDS.map((f) => [f, 0]));
+    for (const r of list) for (const f of FIELDS) t[f] += num(r[f]);
+    return t;
+  };
+  const groupBy = (key) => {
+    const m = new Map();
+    for (const r of rows) {
+      const k = String(r[key] || "?");
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }
+    return [...m].map(([k, list]) => ({ name: k, ...sum(list) })).sort((a, b) => b.saved_tokens - a.saved_tokens);
+  };
+  const price = () => {
+    const p = Number(info.price_per_m);
+    return isFinite(p) && p >= 0 && info.price_per_m !== undefined && info.price_per_m !== null ? p : DEFAULT_PRICE;
+  };
+  const localDay = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+
+  function renderTiles() {
+    const t = sum(rows);
+    $("t-saved").textContent = rows.length ? fmt(t.saved_tokens) : "—";
+    $("t-read").textContent = rows.length ? fmt(t.prompt_tokens) : "—";
+    $("t-read-hint").textContent = rows.length ? fmt(t.answer_tokens) + " answer tokens came back, " + mb(t.file_bytes) + " of files read" : "Prompt tokens, files included";
+    $("t-calls").textContent = rows.length ? t.calls.toLocaleString("en-US") : "—";
+    const days = new Set(rows.map((r) => r.date)).size;
+    $("t-calls-hint").textContent = rows.length ? "Over " + days + (days === 1 ? " day" : " days") + ", " + new Set(rows.map((r) => r.pc)).size + " PC(s)" : "—";
+    $("t-saved-hint").textContent = rows.length ? "All synced days" : "Waiting for the first sync";
+    const cost = (t.saved_tokens / 1e6) * price();
+    $("t-cost").textContent = rows.length ? "$" + cost.toFixed(cost < 10 ? 2 : 0) : "—";
+    const input = $("price");
+    if (document.activeElement !== input) input.value = String(price());
+    $("refusals").textContent = t.refusals + " refused";
+    $("refusals").className = "pill" + (t.refusals ? " warn" : "");
+    $("errors").textContent = t.errors + " errors";
+    $("errors").className = "pill" + (t.errors ? " bad" : "");
+  }
+
+  function renderTable(id, key, emptyText) {
+    const body = $(id);
+    const groups = groupBy(key);
+    if (!groups.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 5; td.className = "empty"; td.textContent = emptyText;
+      tr.append(td); body.replaceChildren(tr); return;
+    }
+    body.replaceChildren(...groups.map((g) => {
+      const tr = document.createElement("tr");
+      for (const v of [g.name, g.calls.toLocaleString("en-US"), fmt(g.prompt_tokens), fmt(g.saved_tokens), mb(g.file_bytes)]) {
+        const td = document.createElement("td"); td.textContent = v; tr.append(td);
+      }
+      return tr;
+    }));
+  }
+
+  function renderChart() {
+    const box = $("chart");
+    const today = new Date();
+    const days = [];
+    for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push(localDay(d)); }
+    const byDay = new Map(days.map((d) => [d, 0]));
+    for (const r of rows) if (byDay.has(r.date)) byDay.set(r.date, byDay.get(r.date) + num(r.saved_tokens));
+    $("chart-range").textContent = days[0] + " to " + days[29];
+    if (!rows.length) { box.innerHTML = '<p class="empty">Days appear here after the first sync.</p>'; return; }
+
+    const W = Math.max(320, box.clientWidth || 700), H = 220, L = 44, R = 8, T = 10, B = 26;
+    const max = Math.max(...byDay.values(), 1);
+    // A round top for the axis: 1, 2 or 5 times a power of ten
+    const p = Math.pow(10, Math.floor(Math.log10(max)));
+    const top = [1, 2, 5, 10].map((m) => m * p).find((v) => v >= max);
+    const y = (v) => T + (H - T - B) * (1 - v / top);
+    const step = (W - L - R) / days.length, bw = Math.max(2, step * 0.7);
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Saved tokens per day, last 30 days");
+    const el = (name, attrs, text) => { const e = document.createElementNS(ns, name); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; svg.append(e); return e; };
+    for (const v of [0, top / 2, top]) {
+      el("line", { class: "grid", x1: L, x2: W - R, y1: y(v), y2: y(v) });
+      el("text", { x: L - 6, y: y(v) + 3, "text-anchor": "end" }, fmt(v));
+    }
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true;
+    days.forEach((d, i) => {
+      const v = byDay.get(d), x = L + i * step + (step - bw) / 2;
+      const h = Math.max(v ? 2 : 1, y(0) - y(v));
+      const hit = el("rect", { class: "hit", x: L + i * step, y: T, width: step, height: H - T - B });
+      const bar = el("rect", { class: "bar" + (v ? "" : " zero"), x, y: y(0) - h, width: bw, height: h, rx: 1 });
+      const show = () => {
+        bar.classList.add("on");
+        tip.textContent = d + ": " + v.toLocaleString("en-US") + " saved";
+        tip.style.left = Math.min(Math.max((x + bw / 2) / W * 100, 12), 88) + "%";
+        tip.style.top = (y(v) - 2) / H * 100 + "%";
+        tip.hidden = false;
+      };
+      const hide = () => { bar.classList.remove("on"); tip.hidden = true; };
+      hit.addEventListener("mouseenter", show); hit.addEventListener("mouseleave", hide);
+      hit.addEventListener("touchstart", show, { passive: true });
+      if (i % 5 === 4 || i === 0) el("text", { x: x + bw / 2, y: H - 8, "text-anchor": "middle" }, d.slice(5));
+    });
+    box.replaceChildren(svg, tip);
+  }
+
+  function renderMeta() {
+    $("last-sync").textContent = info.last_sync ? new Date(info.last_sync).toLocaleString() : "never";
+    $("note").textContent = info.note || "";
+  }
+
+  function render() { renderTiles(); renderChart(); renderTable("projects", "project", "No projects synced yet."); renderTable("pcs", "pc", "No PCs synced yet."); renderMeta(); }
+
+  let savedPrice = null;
+  $("price").addEventListener("change", async () => {
+    const v = Number($("price").value);
+    const state = $("price-state");
+    if (!isFinite(v) || v < 0) { state.textContent = "not a price"; return; }
+    info = { ...info, price_per_m: v };
+    render();
+    if (!db) { state.textContent = "not saved"; return; }
+    try {
+      await db.doc("meta/info").set({ ...info, price_per_m: v });
+      state.textContent = "saved";
+    } catch (e) {
+      state.textContent = e && e.code === "invalid_argument" ? "view only" : "not saved";
+    }
+    clearTimeout(savedPrice); savedPrice = setTimeout(() => (state.textContent = ""), 2500);
+  });
+
+  let resizeTimer = null;
+  window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderChart, 150); });
+
+  render();
+  (async () => {
+    db = window.claude && window.claude.use ? await window.claude.use("db") : null;
+    if (!db) { $("last-sync").textContent = "unavailable here"; return; }
+    db.collection("daily").onSnapshot((snap) => { rows = snap.docs.map((d) => d.data() || {}); render(); }, () => {});
+    db.doc("meta/info").onSnapshot((snap) => { info = (snap.exists && snap.data()) || {}; render(); }, () => {});
+    try {
+      const user = await window.claude.use("user");
+      const can = user && user.can ? await user.can("data.write") : null;
+      if (can === false) { $("price").disabled = true; }
+    } catch (e) {}
+  })();
+})();
+</script>

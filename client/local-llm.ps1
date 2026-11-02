@@ -4,12 +4,13 @@
 #   local-llm remove 192.168.1.189
 #   local-llm list                          (and whether each rig answers now)
 #   local-llm unregister                    (removes every rig and the MCP server itself)
+#   local-llm stats [days] [--json]         (this PC's usage of the local model: calls, tokens saved; days 14)
 #
 # The rig list lives only in the server's Claude Code registration (its OLLAMA_URLS), which each command rewrites.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page.
 
 param(
-    [Parameter(Position = 0)][ValidateSet('add', 'remove', 'list', 'unregister')][string]$Action = 'list',
+    [Parameter(Position = 0)][ValidateSet('add', 'remove', 'list', 'unregister', 'stats')][string]$Action = 'list',
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$Rigs
 )
 
@@ -86,6 +87,13 @@ function Save-Rigs([string]$claude, [string[]]$urls, $current) {
     $extraRoots = @((Join-Path $env:LOCALAPPDATA 'Unity\Editor'), (Join-Path $env:LOCALAPPDATA 'Temp\claude')) -join ';'
     $output = & $claude mcp add $name --scope user -e "OLLAMA_URLS=$($urls -join ',')" -e "LOCAL_LLM_ROOTS=$extraRoots" -- $python $server 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "claude mcp add failed: $output" }
+}
+
+# Reads only this PC's usage log, so it needs neither Claude Code nor a registration
+if ($Action -eq 'stats') {
+    $python = Find-Python
+    & $python $server --stats @($Rigs | Where-Object { $_ })
+    exit $LASTEXITCODE
 }
 
 $claude = Find-Claude

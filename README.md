@@ -96,14 +96,30 @@ cd "I:\Development\Mining\Hive Custom Miners\Ollama-Hive"
 | `local-llm remove <address>[:port] ...` | Removes rigs; removing the last one unregisters the server |
 | `local-llm list` | Lists the rigs and whether each answers now (also what a double-click does) |
 | `local-llm unregister` | Removes every rig and the server |
+| `local-llm stats [days] [--json]` | This PC's usage of the local model (see below); `days` defaults to 14 |
 
 It registers for the current Windows user, in every project, and keeps the rig list in that registration only. Rigs are
 tried in the order added: the first with a model loaded is used, so list every rig that might be on this flight sheet.
-New sessions get `local_llm_status` and `local_llm_ask`. The client reads files from the session's folder, the Unity
+New sessions get `local_llm_status`, `local_llm_ask` and `local_llm_stats`. The client reads files from the session's folder, the Unity
 editor logs (`%LOCALAPPDATA%\Unity\Editor`) and Claude's scratch folders (`%LOCALAPPDATA%\Temp\claude`), and nowhere
 else; after pulling a client change, run `add` again so the registration picks it up. The registration points at this clone's
 `client\local_llm_mcp.py`, so a pull updates the client too; after moving the clone, run `add` again. Files are read on the worker PC, only from the session's working directory unless `LOCAL_LLM_ROOTS`
 says otherwise, and go to the rig over plain HTTP on your LAN.
+
+### Usage stats
+
+Every token the model reads is one Claude did not, so the client logs each `local_llm_ask` itself, at no cost to Claude:
+one JSON line per call in `%LOCALAPPDATA%\local-llm\stats.jsonl` (`~/.local-llm/stats.jsonl` elsewhere; the
+`LOCAL_LLM_STATS` environment variable overrides it). A line holds the time (`ts`, UTC, and `day`, the PC's own date),
+`pc`, `project` (the folder of `CLAUDE_PROJECT_DIR`, else of the working directory), `rig`, `model`, `prompt_tokens`,
+`answer_tokens`, `saved_tokens` (prompt minus answer, never below 0: the answer still enters Claude's context),
+`file_bytes`, `files`, `seconds`, `think` and `cut_off`. A request that failed has `error: true`, and one refused for
+not fitting the context has `refused: true` with its `estimate` and the rig's `context`. If the log can't be written the
+answer comes back anyway.
+
+Sessions read it with the `local_llm_stats` tool: totals, then one line per project and per day for the last `days`
+(default 14); `json: true` returns the aggregate as JSON, with one row per PC, project and day, for a dashboard. From
+the shell, `local-llm stats` prints the same summary (it needs only Python, not a registration).
 
 ## Checks on a rig
 

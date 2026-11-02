@@ -20,6 +20,7 @@ Run it with the PowerShell tool from the repository root (the folder that holds 
 | Remove a rig | `remove 192.168.1.189` |
 | Which rigs, or is it working | `list` |
 | Remove everything | `unregister` (ask first: it removes every rig) |
+| How much it has been used or saved | `stats` (add a number of days, default 14) |
 
 With no address given for `add` or `remove`, ask for it. Several addresses can follow one action.
 
