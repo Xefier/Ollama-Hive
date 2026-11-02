@@ -75,11 +75,19 @@ you switch away. Fan control stays with Hive.
 
 ## Connecting Claude
 
-On each worker PC, clone or pull this repo, then add the rigs from its `client` folder (needs Claude Code and Python 3.8
-or newer; nothing to install):
+On each worker PC, clone or pull this repo (needs Claude Code and Python 3.8 or newer; nothing to install). Then either:
 
-```bash
-client\local-llm add 192.168.1.189
+- **Ask Claude:** open Claude Code in this repo's folder and say `/local-llm add 192.168.1.189`, or just "add the rig
+  at 192.168.1.189". The repo's `local-llm` skill runs the command.
+- **Or run it yourself** in PowerShell. It has to run from this repo's folder: from anywhere else PowerShell reports
+  that "the module 'client' could not be loaded". Change to the folder first, wherever your clone is:
+
+```powershell
+cd "I:\Development\Mining\Hive Custom Miners\Ollama-Hive"
+```
+
+```powershell
+.\client\local-llm.cmd add 192.168.1.189
 ```
 
 | Command | Does |
