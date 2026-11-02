@@ -134,7 +134,7 @@ tr:last-child td { border-bottom: 0; }
 
   <section class="card" id="daily-chart">
     <div class="card-head">
-      <h2>Saved tokens per day</h2>
+      <h2 id="chart-title">Saved usage per day</h2>
       <span class="hint" id="chart-range">Last 30 days</span>
     </div>
     <div class="chart" id="chart"><p class="empty">Days appear here after the first sync.</p></div>
@@ -272,13 +272,17 @@ tr:last-child td { border-bottom: 0; }
     const today = new Date();
     const days = [];
     for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push(localDay(d)); }
-    const byDay = new Map(days.map((d) => [d, 0]));
-    for (const r of rows) if (byDay.has(r.date)) byDay.set(r.date, byDay.get(r.date) + num(r.saved_tokens));
-    $("chart-range").textContent = days[0] + " to " + days[29];
+    const tokens = new Map(days.map((d) => [d, 0]));
+    for (const r of rows) if (tokens.has(r.date)) tokens.set(r.date, tokens.get(r.date) + num(r.saved_tokens));
+    const asPct = usdPerPct() !== null;
+    const byDay = new Map(days.map((d) => [d, asPct ? pct(tokens.get(d)) : tokens.get(d)]));
+    const label = asPct ? (v) => fmtPct(v) : (v) => fmt(v);
+    $("chart-title").textContent = asPct ? "Saved usage per day, % of the weekly limit" : "Saved tokens per day";
+    $("chart-range").textContent = days[0] + " to " + days[29] + (anchor() !== null ? " · dashed lines: plan week starts" : "");
     if (!rows.length) { box.innerHTML = '<p class="empty">Days appear here after the first sync.</p>'; return; }
 
     const W = Math.max(320, box.clientWidth || 700), H = 220, L = 44, R = 8, T = 10, B = 26;
-    const max = Math.max(...byDay.values(), 1);
+    const max = Math.max(...byDay.values(), asPct ? 0.01 : 1); // floor: 0.01% or one token
     // A round top for the axis: 1, 2 or 5 times a power of ten
     const p = Math.pow(10, Math.floor(Math.log10(max)));
     const top = [1, 2, 5, 10].map((m) => m * p).find((v) => v >= max);
@@ -289,12 +293,15 @@ tr:last-child td { border-bottom: 0; }
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     svg.setAttribute("width", "100%");
     svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "Saved tokens per day, last 30 days");
+    svg.setAttribute("aria-label", (asPct ? "Saved usage per day as a percent of the weekly limit" : "Saved tokens per day") + ", last 30 days");
     const el = (name, attrs, text) => { const e = document.createElementNS(ns, name); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; svg.append(e); return e; };
     for (const v of [0, top / 2, top]) {
       el("line", { class: "grid", x1: L, x2: W - R, y1: y(v), y2: y(v) });
-      el("text", { x: L - 6, y: y(v) + 3, "text-anchor": "end" }, fmt(v));
+      el("text", { x: L - 6, y: y(v) + 3, "text-anchor": "end" }, label(v));
     }
+    if (anchor() !== null) days.forEach((d, i) => {
+      if (i > 0 && weekOf(d) !== weekOf(days[i - 1])) el("line", { class: "grid week", x1: L + i * step, x2: L + i * step, y1: T, y2: H - B, "stroke-dasharray": "3 3" });
+    });
     const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true;
     days.forEach((d, i) => {
       const v = byDay.get(d), x = L + i * step + (step - bw) / 2;
@@ -303,7 +310,7 @@ tr:last-child td { border-bottom: 0; }
       const bar = el("rect", { class: "bar" + (v ? "" : " zero"), x, y: y(0) - h, width: bw, height: h, rx: 1 });
       const show = () => {
         bar.classList.add("on");
-        tip.textContent = d + ": " + v.toLocaleString("en-US") + " saved";
+        tip.textContent = d + ": " + (asPct ? fmtPct(v) + " of the weekly limit, " + tokens.get(d).toLocaleString("en-US") + " tokens" : v.toLocaleString("en-US") + " tokens saved");
         tip.style.left = Math.min(Math.max((x + bw / 2) / W * 100, 12), 88) + "%";
         tip.style.top = (y(v) - 2) / H * 100 + "%";
         tip.hidden = false;
