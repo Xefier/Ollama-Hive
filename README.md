@@ -162,8 +162,9 @@ prices (`CLAUDE_PRICES` in `client/local_llm_mcp.py`) are only a weighting betwe
 since the plan's accounting is not published. `usd_per_m_in_context` is what a million tokens entering Claude's
 context really cost over the window: cache-write plus cache-read dollars per million tokens written, since each token is
 written to the cache once and re-read on every later turn (`reads_per_written_token` says how often). It is the value of
-a million tokens the local model read instead, so it sets the dashboard's price per million. `dashboard/sync.md` says
-how both numbers reach the dashboard.
+a million tokens the local model read instead, so it sets the dashboard's price per million. The dashboard's sync recipe
+and page source moved to the `local-llm-dashboard` skill in `Xefier/claude-dashboards`, which says how both numbers
+reach the dashboard.
 
 ## Checks on a rig
 
