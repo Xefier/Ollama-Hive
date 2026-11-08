@@ -13,7 +13,8 @@ ollama_hive_valid() {
         ollama_version)                 [[ $2 =~ ^[A-Za-z0-9.+-]+$ ]] ;;
         gpus)                           [[ $2 =~ ^[0-9,]+$ ]] ;;
         bind)                           [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && $2 != 0.0.0.0 ]] ;;
-        reset_oc|allow_docker)          [[ $2 =~ ^[01]$ ]] ;;
+        reset_oc|allow_docker|flash_attention) [[ $2 =~ ^[01]$ ]] ;;
+        kv_cache_type)                  [[ $2 =~ ^(f16|q8_0|q4_0)$ ]] ;;
         *)                              return 2 ;;
     esac
 }

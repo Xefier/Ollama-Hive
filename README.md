@@ -8,7 +8,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.3.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.4.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -27,6 +27,8 @@ num_parallel=2
 | `model` | none, required | Ollama model to pull and keep loaded |
 | `num_ctx` | `32768` | Context size per request |
 | `num_parallel` | `2` | Requests served at once. VRAM use grows with `num_ctx` x `num_parallel` |
+| `kv_cache_type` | `f16` | `q8_0` or `q4_0` quantizes the context's KV cache: `q8_0` about halves its VRAM with little quality loss, so a larger `num_ctx` fits. Turns on flash attention, which it needs |
+| `flash_attention` | Ollama's default | `1` or `0`. Only needed to force it; `0` can't be combined with a quantized `kv_cache_type` |
 | `port` | `11434` | API port |
 | `bind` | the rig's private LAN address | Address to listen on. Anything else on that network can reach it unless the firewall limits it |
 | `allow` | the rig's own LAN | Comma-separated CIDRs allowed to connect, e.g. `192.168.1.0/24` |
@@ -176,7 +178,7 @@ miner log
 curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 ```
 
-`size_vram` should equal `size`. If not, the model has spilled out of VRAM: lower `num_ctx` or `num_parallel`.
+`size_vram` should equal `size`. If not, the model has spilled out of VRAM: lower `num_ctx` or `num_parallel`, or set `kv_cache_type=q8_0`.
 
 ## Files
 

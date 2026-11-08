@@ -15,6 +15,9 @@ OH_WATCHDOG="hive-watchdog"
 OH_MODEL=""
 OH_NUM_CTX=32768
 OH_NUM_PARALLEL=2
+# Empty: Ollama's own defaults (f16 cache; flash attention where Ollama turns it on for the model)
+OH_FLASH_ATTENTION=""
+OH_KV_CACHE_TYPE=""
 OH_PORT=11434
 OH_ALLOW=""
 # Outside the miner folder: custom-get deletes that folder when a new version of this miner is installed.

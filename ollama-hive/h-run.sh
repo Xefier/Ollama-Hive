@@ -66,6 +66,8 @@ wait_for_blocker() {
 
 find_settings_problem() {
     [[ -n $OH_MODEL ]] || { echo "No model set: add model=<name> to the flight sheet's Extra config arguments"; return; }
+    [[ $OH_KV_CACHE_TYPE =~ ^q && $OH_FLASH_ATTENTION == 0 ]] \
+        && { echo "kv_cache_type=$OH_KV_CACHE_TYPE needs flash attention: remove flash_attention=0"; return; }
     [[ -n $(oh_lan_address) ]] || { echo "No private LAN address found: set bind=<address> in the flight sheet"; return; }
     command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU' \
         || echo "No NVIDIA GPU found: this miner only supports NVIDIA"
@@ -213,6 +215,11 @@ start_server() {
     export OLLAMA_MODELS="$OH_DATA_DIR/models"
     export OLLAMA_CONTEXT_LENGTH="$OH_NUM_CTX"
     export OLLAMA_NUM_PARALLEL="$OH_NUM_PARALLEL"
+    # A quantized KV cache needs flash attention: Ollama silently keeps f16 without it
+    local flash="$OH_FLASH_ATTENTION"
+    [[ -z $flash && $OH_KV_CACHE_TYPE =~ ^q ]] && flash=1
+    [[ -n $flash ]] && export OLLAMA_FLASH_ATTENTION="$flash"
+    [[ -n $OH_KV_CACHE_TYPE ]] && export OLLAMA_KV_CACHE_TYPE="$OH_KV_CACHE_TYPE"
     export OLLAMA_MAX_LOADED_MODELS=1
     export OLLAMA_KEEP_ALIVE=-1
     [[ -n $OH_GPUS ]] && export CUDA_VISIBLE_DEVICES="$OH_GPUS"
@@ -267,9 +274,9 @@ report_placement() {
     if [[ $size =~ ^[0-9]+$ && $vram =~ ^[0-9]+$ && $size -gt 0 ]]; then
         local percent=$(( vram * 100 / size ))
         if [[ $percent -lt 100 ]]; then
-            notify warn "$OH_MODEL is only $percent% on GPU: lower num_ctx or num_parallel, or use a smaller model"
+            notify warn "$OH_MODEL is only $percent% on GPU: lower num_ctx or num_parallel, set kv_cache_type=q8_0, or use a smaller model"
         else
-            log "$OH_MODEL is 100% on GPU ($(( size / 1024 / 1024 )) MiB, num_ctx=$OH_NUM_CTX x $OH_NUM_PARALLEL)"
+            log "$OH_MODEL is 100% on GPU ($(( size / 1024 / 1024 )) MiB, num_ctx=$OH_NUM_CTX x $OH_NUM_PARALLEL, kv_cache_type=${OH_KV_CACHE_TYPE:-f16})"
         fi
     fi
 }
