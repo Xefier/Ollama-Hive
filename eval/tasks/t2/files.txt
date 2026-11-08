@@ -1,0 +1,3 @@
+tasks/t2/inputs/ConsoleCommandBase.cs
+tasks/t2/inputs/LootCommand.cs
+tasks/t2/inputs/GodModeCommand.cs

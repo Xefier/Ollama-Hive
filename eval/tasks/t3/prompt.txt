@@ -1,0 +1,15 @@
+Write a new editor-only file ScriptCarriersWindow.cs (it goes in an Editor folder, assembly Assembly-CSharp-Editor),
+an EditorWindow opened from the menu "Tools/Debug/Script Carriers".
+
+Purpose: before adding a serialized field to a MonoBehaviour we must know how many prefabs carry it, because each
+carrier gets reimported. The window:
+- has an ObjectField for a MonoScript, and a "Count carriers" button;
+- on the button, gets the script's GUID (AssetDatabase.TryGetGUIDAndLocalFileIdentifier or AssetPathToGUID of its
+  path) and finds every .prefab file under Assets whose text contains "guid: <that guid>" (read the files as text
+  with System.IO; there are ~15,000 prefabs, so show EditorUtility.DisplayCancelableProgressBar every 200 files and
+  stop when cancelled; always clear the bar in a finally);
+- shows "N prefabs carry <ScriptName>" and a scrollable list of the matching asset paths; clicking one pings and
+  selects that prefab (EditorGUIUtility.PingObject, Selection.activeObject);
+- a warning HelpBox when N > 20: "Adding a serialized field to this script reimports N prefabs. Put the field on a
+  settings ScriptableObject instead."
+Read files with a shared buffer or File.ReadAllText is fine; do not load prefabs with AssetDatabase to search them.

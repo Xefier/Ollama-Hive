@@ -1,0 +1,96 @@
+```csharp
+// FILE: NonLinearModifierManager.cs
+using System.Collections.Generic;
+using UnityEngine;
+using Fusion;
+using Xefier.Core.Linq;
+using FIMSpace.Generating;
+using Unity.VisualScripting;
+
+/// <summary>
+/// Handles non-linear scene modifiers (hazard triggering, light changes).
+/// Hazard instantiation is fully delegated to HazardSpawnManager.
+/// </summary>
+public class NonLinearModifierManager : Singleton<NonLinearModifierManager>
+{
+    // Scene Var names can be found in the Non Linear Prefab:
+    // Non Linear > Modifier Manager > Modifier_SpawnSomething / LightColours
+
+    public SerializableDictionary<string, Color> availableColours = new();
+    public List<Color> discoColours = new();
+
+    // ── Hazard spawning (forwarded to HazardSpawnManager) ────────────────────
+
+    public void SpawnBalloons(bool b) => HazardSpawnManager.Instance.SpawnBalloons(b);
+    public void SpawnBrokenGlass(bool b) => HazardSpawnManager.Instance.SpawnBrokenGlass(b);
+    public void SpawnNecroEggs(bool b) => HazardSpawnManager.Instance.SpawnNecroEggs(b);
+    public void SpawnStinkBalloons(bool b) => HazardSpawnManager.Instance.SpawnStinkBalloons(b);
+    public void SpawnLeeches(bool b) => HazardSpawnManager.Instance.SpawnLeeches(b);
+    public void SpawnWhoopeeCushion(bool b) => HazardSpawnManager.Instance.SpawnWhoopeeCushion(b);
+
+    // ── Light modifiers ───────────────────────────────────────────────────────
+
+    public void LightsRed(bool b) { if (b) LightsOneColourModifier("red"); }
+    public void LightsOrange(bool b) { if (b) LightsOneColourModifier("orange"); }
+    public void LightsYellow(bool b) { if (b) LightsOneColourModifier("yellow"); }
+    public void LightsGreen(bool b) { if (b) LightsOneColourModifier("green"); }
+    public void LightsBlue(bool b) { if (b) LightsOneColourModifier("blue"); }
+    public void LightsIndigo(bool b) { if (b) LightsOneColourModifier("indigo"); }
+    public void LightsViolet(bool b) { if (b) LightsOneColourModifier("violet"); }
+    public void LightsCyan(bool b) { if (b) LightsOneColourModifier("cyan"); }
+    public void LightsMagenta(bool b) { if (b) LightsOneColourModifier("magenta"); }
+    public void LightsNormal(bool b) { /* intentional no-op */ }
+
+    public void LightsOneColourModifier(string colourName)
+    {
+        if (!availableColours.ContainsKey(colourName))
+        {
+            DebugX.LogError($"<b>{colourName}</b> was not found in availableColours");
+            return;
+        }
+
+        Color target = availableColours[colourName.ToLower()];
+        LightService.Instance.SetColorFilter(target);
+    }
+
+    public void LightsRandomColoursModifer(bool b)
+    {
+        if (!b) return;
+
+        foreach (var l in LightService.Instance)
+        {
+            l.ColorFilter = new Color(
+                Random.Range(0f, 1f),
+                Random.Range(0f, 1f),
+                Random.Range(0f, 1f));
+        }
+    }
+
+    public void LightsDisco(bool b)
+    {
+        if (!b) return;
+
+        foreach (var l in LightService.Instance)
+        {
+            l.ColorFilter = discoColours[Mathf.RoundToInt(Random.Range(0, discoColours.Count - 1))];
+        }
+    }
+
+    public void LightsOff(bool b)
+    {
+        if (!b) return;
+
+        foreach (var l in LightService.Instance)
+        {
+            l.SetLightState(ILight.LightState.Off);
+        }
+    }
+}
+```
+
+- `LightService.Instance` is the existing registry (maintained in `Light_Base.OnEnable/OnDisable`) and implements `IEnumerable<ILight>`, so iterating it replaces every `FindObjectsOfType<Light_Base>()` call.
+- `LightsOneColourModifier` now delegates to `LightService.SetColorFilter`, which is the service's own method for exactly this purpose; the per-light try/catch from the old code is dropped since the service does the same without it.
+- I assumed `ILight` exposes both `ColorFilter` (confirmed by `LightService.SetColorFilter`) and `SetLightState` (confirmed by `Light_Base` implementing `ILight` and the method being called in the original code); I did not see the `ILight` interface source, but both members are clearly part of it.
+- The random-color and disco paths still assign a *different* colour per light, so they iterate the service rather than calling the single-colour `SetColorFilter` helper.
+
+[qwen3.8:27b on http://192.168.1.189:11434: 8397 prompt tokens, 3508 answer tokens, 123 tokens/s]

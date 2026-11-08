@@ -1,0 +1,3 @@
+NonLinearModifierManager.cs (given) is runtime code that calls FindObjectsOfType<Light_Base>() four times, which
+the project forbids. Remove every scene scan from it without changing what each modifier does to the lights.
+Light_Base.cs and LightService.cs are given too. Output every file you change, whole.

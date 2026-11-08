@@ -1,0 +1,13 @@
+Fix a bug in the given file TailAnimator_AnimationAndIkHandler.cs (output the whole fixed file as
+TailAnimator_AnimationAndIkHandler.cs).
+
+Diagnosis (already confirmed): the handler sits on a "Tail Controller" GameObject that is inactive while the
+Tenant's "Tentacle Effects" option is off and while the DemonDog is outside its Super form. Callers still call into
+it while it is inactive: the DemonDog's form switch calls SetTailsOut on every spawn and every Small/Big switch, the
+Tenant's state machine calls it at spawn, and the Tenant's smell listener calls SetTargetPosition. Each such call
+starts a coroutine, and Unity logs the error "Coroutine couldn't be started because the game object 'Tail
+Controller' is inactive!" and runs nothing.
+
+Wanted: no error from an inactive controller. Behaviour must otherwise stay exactly the same: whatever happens today
+on an active controller still happens, and whatever non-coroutine work those methods do on an inactive one (e.g.
+setting animator parameters) still happens. Keep the change minimal.

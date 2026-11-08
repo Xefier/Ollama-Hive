@@ -1,0 +1,88 @@
+Write a Unity editor window, ApparelEditorWindow, for browsing and editing apparel assets (ApparelObj, a
+ScriptableObject; its source is given). Output ONE file: `// FILE: ApparelEditorWindow.cs`. It goes in
+Assets/_LiminalLabs/Integrations/CharacterCustomizer/Editor/ (compiled into Assembly-CSharp-Editor). Wrap the whole
+file in `#if UNITY_EDITOR` ... `#endif` like the other files there, namespace LiminalLabs.CharacterCustomizer.
+
+WHAT IT DOES
+- Menu item "Tools/Character Customizer/Apparel Editor" opens it (GetWindow<ApparelEditorWindow>("Apparel Editor")).
+- Loads every ApparelObj in the project: AssetDatabase.FindAssets("t:ApparelObj"), GUIDToAssetPath,
+  LoadAssetAtPath<ApparelObj>, skip nulls, sort by asset name (string.CompareOrdinal on .name). Reload in OnEnable,
+  on a "Refresh" toolbar button, and in OnProjectChange() (an EditorWindow message: just set a flag and reload at the
+  next OnGUI, plus Repaint()). Using FindAssets is fine: editor tooling (put a one-line comment saying so).
+- Layout: a toolbar row on top, then two panes side by side: the list on the left (fixed width 320), the selected
+  asset's details on the right.
+
+TOOLBAR (one EditorGUILayout.BeginHorizontal(EditorStyles.toolbar) row)
+- Search text: `search = EditorGUILayout.TextField(search, EditorStyles.toolbarSearchField, GUILayout.MinWidth(120));`
+  Case-insensitive match against the asset name, Apparel.Name and Apparel.DisplayName
+  (`text.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0`; any of them may be null).
+- Status filter: an enum `StatusFilter { All, NotDone, Done, ManuallyHidden }` shown with
+  `(StatusFilter)EditorGUILayout.EnumPopup(filter, EditorStyles.toolbarPopup, GUILayout.Width(110))`.
+    - NotDone: apparel.NotDone is true.
+    - Done: apparel.NotDone is false.
+    - ManuallyHidden: apparel.NotDone is false AND (apparel.UsableInCharacterCreator is false OR apparel.HiddenOnBodies is
+      non-null and non-empty). A Not-done item never shows here; a manually hidden item that is done never shows under
+      NotDone.
+- Slot filter: a popup of "Any slot" followed by every ApparelSlot name (Enum.GetNames(typeof(ApparelSlot))), with
+  `EditorGUILayout.Popup(index, options, EditorStyles.toolbarPopup, GUILayout.Width(90))`. A slot matches when
+  apparel.Slots (may be null) contains it.
+- GUILayout.FlexibleSpace(), then a label with "<shown> of <total>" (GUILayout.Label(text, EditorStyles.miniLabel)).
+- Button "Mark all shown done" (GUILayout.Button(text, EditorStyles.toolbarButton)), enabled only when at least one
+  shown item is Not done (wrap it in `using (new EditorGUI.DisabledScope(!anyNotDoneShown))`). It asks first with
+  `EditorUtility.DisplayDialog("Mark apparel done", "Mark N apparel done? They become visible to players.", "Mark done",
+  "Cancel")` and then marks each shown Not-done item done (see MARKING DONE).
+- Button "Refresh" (toolbarButton).
+
+LIST (left pane)
+- `EditorGUILayout.BeginVertical(GUILayout.Width(320))`, a scroll view
+  (`listScroll = EditorGUILayout.BeginScrollView(listScroll)` / `EndScrollView()`).
+- One row per shown apparel: `Rect row = EditorGUILayout.GetControlRect(false, 20);`. Draw the selected row's
+  background with `EditorGUI.DrawRect(row, new Color(0.24f, 0.48f, 0.90f, 0.35f))`. Inside the row: the asset name
+  (EditorGUI.LabelField on the left part), the primary slot (apparel.Slots[0] when it has any, else "-") in a 70 px
+  column, and a status tag at the right end, 70 px wide: "Not done" in orange (a GUIStyle copied from
+  EditorStyles.miniLabel with normal.textColor = new Color(1f, 0.6f, 0.2f)), "Hidden" in grey for ManuallyHidden
+  items, nothing for the rest. Build the styles once (lazy fields), not every OnGUI.
+- Clicking a row selects it: `if (Event.current.type == EventType.MouseDown && row.Contains(Event.current.mousePosition))
+  { selected = apparel; Event.current.Use(); GUI.FocusControl(null); }`. Up/Down arrow keys move the selection through
+  the shown list while the window has focus (check Event.current.type == EventType.KeyDown and keyCode
+  KeyCode.UpArrow / KeyCode.DownArrow, then Event.current.Use()).
+- Keep the selection when the list reloads if the same asset is still there (compare by reference after reload, or by
+  asset path).
+- With nothing shown, a GUILayout.Label("No apparel matches.") instead of rows.
+
+DETAILS (right pane)
+- `EditorGUILayout.BeginVertical()`, its own scroll view (detailScroll).
+- Nothing selected: EditorGUILayout.HelpBox("Select an apparel on the left.", MessageType.Info).
+- Selected:
+    - The asset as a read-only object field: `using (new EditorGUI.DisabledScope(true))
+      EditorGUILayout.ObjectField("Asset", selected, typeof(ApparelObj), false);`
+    - A status line: if NotDone, EditorGUILayout.HelpBox("Not done yet: hidden from players on every body and never
+      sold. Mark it done to show it.", MessageType.Warning) then a button "Mark done" (GUILayout.Button with
+      GUILayout.Height(24)) that marks it done (see MARKING DONE). If done, a HelpBox "Done: visible to players" plus,
+      when it is manually hidden, " (but manually hidden: Usable In Character Creator is off or Hidden On Bodies is
+      set)", MessageType.Info.
+    - Then the full inspector of the asset, drawn by a cached Editor:
+      `Editor.CreateCachedEditor(selected, null, ref cachedEditor); cachedEditor.OnInspectorGUI();`
+      (field `private Editor cachedEditor;`; in OnDisable call `DestroyImmediate(cachedEditor)` when not null). The
+      inspector already records undo and dirties the asset itself; do nothing extra for edits made there.
+    - A "Ping" button (EditorGUIUtility.PingObject(selected)) and a "Select in Project" button
+      (Selection.activeObject = selected) on one row above the inspector.
+
+MARKING DONE (one private static method used by both buttons; never copy it)
+- `static void MarkDone(IEnumerable<ApparelObj> items, Dictionary<string, ApparelObj> byAssetName)`.
+- A garment made for several bodies has one version per body, linked by name, and they share one status: marking one
+  done marks every version. For each item, the other versions' asset names are:
+  `ApparelCatalog.BodyVersionsOf(item.Apparel.Name)` returns `List<ApparelIndex.Entry>`; each entry's `AssetName`
+  (string) is a version's asset name; look it up in byAssetName (asset name -> loaded ApparelObj, built when the list
+  loads). Collect the items plus their versions into one HashSet<ApparelObj>, then for each one with NotDone true:
+  `Undo.RecordObject(apparel, "Mark apparel done"); apparel.NotDone = false; EditorUtility.SetDirty(apparel);
+  AssetDatabase.SaveAssetIfDirty(apparel);` (save each asset alone: never AssetDatabase.SaveAssets(), the editor is
+  shared). Then one `Debug.Log($"[ApparelEditorWindow] Marked done: {names}")` with the marked asset names joined by
+  ", " (editor tooling may use Debug.Log). Saving reimports the assets, which rebuilds the apparel index on its own.
+
+STYLE
+- Private fields camelCase, no `this.`, braces as in the given file, few comments (why, not what). Use only the APIs
+  named here, the members of ApparelObj in the given file, ApparelCatalog.BodyVersionsOf and ApparelIndex.Entry.AssetName
+  as described, and standard UnityEditor/UnityEngine/System/System.Linq APIs. Do NOT invent any other project type or
+  member. ApparelSlot is an enum in the same namespace (Upper, Lower, Shoes, Hat, FullBody, Face, Wrist, Waist).
+- Make sure every Begin* has its End* on every path (no early return between them).

@@ -1,0 +1,4 @@
+tasks/t1/test/bin/
+tasks/t1/test/obj/
+.build/
+__pycache__/

@@ -1,0 +1,13 @@
+Write a new file RollingStats.cs: a pure C# class (no UnityEngine) `public sealed class RollingStats` in namespace
+Xefier.Core.Stats, keeping statistics over the last N float samples (a sliding window, e.g. frame times).
+
+- `RollingStats(int capacity)`: capacity < 1 throws ArgumentOutOfRangeException.
+- `void Add(float value)`: O(1), no allocation. Once full, the oldest sample drops out.
+- `int Count`, `int Capacity`.
+- `float Mean`: O(1) from a running sum kept as a double, so it does not drift over millions of Adds.
+- `float Min`, `float Max`: may be O(n) over the window.
+- `float Percentile(float p)`: p in [0, 1] (outside throws ArgumentOutOfRangeException), nearest-rank method on the
+  current window: rank = ceil(p * Count) clamped to [1, Count], result = the rank-th smallest sample. Must not
+  allocate after construction (preallocate any scratch array in the constructor).
+- Mean, Min, Max and Percentile on an empty window throw InvalidOperationException.
+- `void Clear()`.

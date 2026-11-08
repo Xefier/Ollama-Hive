@@ -1,0 +1,3 @@
+tasks/t5/inputs/NonLinearModifierManager.cs
+tasks/t5/inputs/Light_Base.cs
+tasks/t5/inputs/LightService.cs

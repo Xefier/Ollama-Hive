@@ -1,0 +1,15 @@
+Write a new console command file TileFindCommand.cs in namespace ConsoleUtility, modelled on the given
+LootCommand.cs and GodModeCommand.cs (same attributes, interface members and help style).
+
+Command name "tilefind". It searches the tiles of the current generated level:
+- `tilefind` with no arguments logs the help.
+- `tilefind <text>`: every tile whose GameObject name contains <text>, case-insensitive. Logs one line per match
+  (name, world position rounded to whole metres, "culled" or "visible"), at most 25 lines, then "... and N more",
+  then a total line "<matches> of <all tiles> tiles match '<text>' (<culled> culled)". <text> may contain spaces,
+  e.g. `tilefind Big Tile`.
+- `tilefind <text> -count`: only the total line. -count is a trailing option after a name that may have spaces.
+- No level generated: a warning line "No generated level".
+
+APIs (all public, namespace DunGen): `DungeonGenerator.Instance` (static, may be null), its
+`Dungeon CurrentDungeon` (may be null), `Dungeon.AllTiles` (IReadOnlyCollection<Tile>), `Tile : MonoBehaviour` with
+`bool IsCulled`.
