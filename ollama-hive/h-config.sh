@@ -15,8 +15,8 @@ ollama_hive_valid() {
         llama_cpp)                      [[ $2 =~ ^b[0-9]+$ ]] ;;
         # No & ; or quotes: h-run.sh sources this value
         dataset)                        [[ $2 =~ ^(https?://[A-Za-z0-9._:/%=+?-]+|/[A-Za-z0-9._/-]+)$ ]] ;;
-        coordinator)                    [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && $2 != 0.0.0.0 ]] ;;
-        nodes|train_port|epochs|max_len|lora_r|grad_accum|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
+        peers)                          [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(,[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)*$ ]] ;;
+        train_port|epochs|max_len|lora_r|grad_accum|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
         lr)                             [[ $2 =~ ^[0-9]+(\.[0-9]+)?(e-?[0-9]+)?$ ]] ;;
         run_name)                       [[ $2 =~ ^[A-Za-z0-9._-]+$ ]] ;;
         torch_index)                    [[ $2 =~ ^(cu[0-9]+|cpu)$ ]] ;;

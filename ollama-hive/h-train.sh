@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 
-# mode=train, sourced by h-run.sh: this rig is one worker of a QLoRA run shared between rigs. Every rig runs torchrun
-# with the same settings and meets the others at coordinator=<one rig's LAN address>; train.py does the training.
+# mode=train, sourced by h-run.sh: this rig is one worker of a QLoRA run shared between the rigs in peers=, all with
+# the same settings. train.py does the training; meet.py starts it, and starts it again whenever the group changes.
+# Rigs come and go as rentals take them, so no rig is special: the run goes on with whichever are here, down to one.
 # Nothing is installed into the system: Python, PyTorch, the base model and the run are all under $OH_TRAIN_DIR.
 
 find_train_settings_problem() {
     [[ -n $OH_BASE ]] || { echo "No base model set: add base=<Hugging Face repo> to the flight sheet"; return; }
     [[ -n $OH_DATASET ]] || { echo "No dataset set: add dataset=<URL or path of a .jsonl> to the flight sheet"; return; }
-    [[ -n $OH_COORDINATOR ]] || { echo "No coordinator set: add coordinator=<LAN address of one of the rigs>"; return; }
-    oh_is_private "$OH_COORDINATOR" || echo "coordinator=$OH_COORDINATOR is not a private LAN address"
+    [[ -n $OH_PEERS ]] || { echo "No peers set: add peers=<LAN addresses of all rigs of the run, comma-separated>"; return; }
+    local peer address
+    for peer in $(oh_peers); do
+        oh_is_private "$peer" || { echo "peers= has $peer, which is not a private LAN address"; return; }
+    done
+    address=$(oh_lan_address)
+    [[ -z $address ]] || grep -qxF "$address" <<< "$(oh_peers)" \
+        || echo "This rig's address $address is not in peers=$OH_PEERS: list every rig of the run, this one too"
 }
 
 # One worker per GPU listed in gpus=, and by default one GPU per rig
@@ -52,7 +59,7 @@ install_train_env() {
     echo "$wanted" > "$stamp"
 }
 
-# Runs one attempt: joins the other rigs, trains until the run is finished or any rig drops out
+# Runs meet.py, which trains with whichever rigs are there, until the run is finished or something breaks
 train_once() {
     local address interface gpus workers
     address=$(oh_lan_address)
@@ -87,22 +94,31 @@ train_once() {
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
     wait "$SERVER_PID" || return 1
 
+    local nodes
+    nodes=$(oh_peers | wc -l)
     oh_set_state joining
-    log "Joining the run at $OH_COORDINATOR:$OH_TRAIN_PORT as $address ($OH_NODES rigs, $workers GPU here)"
-    # Its own process group, so h-stop.sh also ends the workers it starts. --local_addr because rigs can't resolve
-    # each other's host names.
-    setsid "$OH_VENV/bin/python" -m torch.distributed.run \
-        --nnodes "$OH_NODES" --nproc_per_node "$workers" --max_restarts 0 \
-        --rdzv_backend c10d --rdzv_endpoint "$OH_COORDINATOR:$OH_TRAIN_PORT" --rdzv_id "$OH_RUN_NAME" \
-        --rdzv_conf join_timeout=3600 --local_addr "$address" \
-        "$OH_DIR/train.py" "${arguments[@]}" >> "$LOG_FILE" 2>&1 &
+    # Its own process group, so h-stop.sh also ends the workers it starts
+    setsid "$OH_VENV/bin/python" "$OH_DIR/meet.py" \
+        --peers "$OH_PEERS" --me "$address" --port "$OH_TRAIN_PORT" --workers "$workers" -- \
+        "$OH_VENV/bin/python" "$OH_DIR/train.py" "${arguments[@]}" --nodes "$nodes" >> "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
+
+    while kill -0 "$SERVER_PID" 2>/dev/null; do
+        pause 20
+        # A rig that lost power mid-step can leave the others waiting on it for good
+        if [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) == training ]] \
+            && [[ -n $(find "$OH_RUN_DIR/train-status" -mmin +20 2>/dev/null) ]]; then
+            log "No step finished in 20 minutes: starting the attempt again"
+            oh_stop_group "$SERVER_PID" 40
+            return 1
+        fi
+    done
     wait "$SERVER_PID"
 }
 
-# A rig leaving stops the step for all of them, so every rig restarts its attempt and they meet again. Each attempt
-# continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
+# meet.py handles rigs joining and leaving by itself, so it only ends when the run is finished or on an error. Every
+# start continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
 train_loop() {
     local told=""
     while true; do
@@ -117,17 +133,17 @@ train_loop() {
         fi
         oh_set_state starting
         train_once
-        kill -TERM -- "-$SERVER_PID" 2>/dev/null
+        oh_stop_group "$SERVER_PID" 5
         [[ -f $OH_RUN_PATH/done ]] && continue
         # It got as far as training, so this is a new stretch of failures
         [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) == training ]] && told=""
         if [[ $told != stopped ]]; then
-            notify warn "Training stopped (a rig left, the coordinator isn't up yet, or an error): retrying every 30 s. See the miner log."
+            notify warn "Training stopped on an error: trying again every 10 s. See the miner log."
             told=stopped
         else
-            log "Training stopped, retrying in 30 s"
+            log "Training stopped, trying again in 10 s"
         fi
         oh_set_state waiting
-        pause 30
+        pause 10
     done
 }

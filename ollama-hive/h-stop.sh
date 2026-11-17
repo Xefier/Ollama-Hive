@@ -12,20 +12,17 @@ if [[ -f $OH_RUN_DIR/tail.pid ]]; then
 fi
 
 if [[ -f $OH_RUN_DIR/server.pid ]]; then
-    server_pid=$(< "$OH_RUN_DIR/server.pid")
-    kill -TERM -- "-$server_pid" 2>/dev/null
-    for (( i = 0; i < 10; i++ )); do
-        kill -0 "$server_pid" 2>/dev/null || break
-        sleep 1
-    done
-    kill -KILL -- "-$server_pid" 2>/dev/null
+    # A training run saves its progress when asked to stop, which takes longer than Ollama letting go
+    grace=10
+    [[ $OH_MODE == train ]] && grace=40
+    oh_stop_group "$(< "$OH_RUN_DIR/server.pid")" "$grace"
     rm -f "$OH_RUN_DIR/server.pid"
 fi
 # Runners and pulls that outlived the server, and only ours: the match is on this miner's own binary path
 pkill -KILL -f "^$OH_BIN( |$)" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/lib/ollama" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/ollama-download" 2>/dev/null
-# A training run or an export, or the install of their tools (uv, the venvs' python, torchrun's workers, llama.cpp)
+# A training run or an export, or the install of their tools (uv, the venvs' python, the workers, llama.cpp)
 if [[ -f $OH_RUN_DIR/export.pid ]]; then
     kill -KILL -- "-$(< "$OH_RUN_DIR/export.pid")" 2>/dev/null
     rm -f "$OH_RUN_DIR/export.pid"

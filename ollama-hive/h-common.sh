@@ -35,8 +35,7 @@ OH_BIND=""
 OH_MODE=serve
 OH_BASE=""
 OH_DATASET=""
-OH_COORDINATOR=""
-OH_NODES=2
+OH_PEERS=""
 OH_TRAIN_PORT=29400
 OH_RUN_NAME=run1
 OH_EPOCHS=3
@@ -109,6 +108,22 @@ oh_remove_firewall() {
     done
     # iptables can create a chain on a kernel where it then can't read or delete it
     command -v nft >/dev/null 2>&1 && nft delete chain ip filter "$OH_CHAIN" 2>/dev/null
+}
+
+# The rigs of a training run, lowest address first: the order that settles which rig the others meet at
+oh_peers() {
+    tr ',' '\n' <<< "$OH_PEERS" | sort -V -u
+}
+
+# Ends a process group this miner started with setsid: asks, waits up to $2 seconds, then kills what is left
+oh_stop_group() {
+    local pid=$1 seconds=${2:-10} i
+    kill -TERM -- "-$pid" 2>/dev/null
+    for (( i = 0; i < seconds; i++ )); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    kill -KILL -- "-$pid" 2>/dev/null
 }
 
 oh_set_state() {

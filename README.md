@@ -179,32 +179,33 @@ part, for example:
 mode=train
 base=unsloth/Qwen3.8-27B-unsloth-bnb-4bit
 dataset=http://192.168.1.50:8000/train.jsonl
-coordinator=192.168.1.189
-nodes=2
+peers=192.168.1.189,192.168.1.232
 run_name=unity-1
 ```
 
-Each rig loads its own 4-bit copy of the base model on one GPU and runs PyTorch's `torchrun`; the rigs meet at
-`coordinator`, which is simply the LAN address of one of them. On every step each rig works through its own examples,
-the adapter's gradients are averaged over the network, and every rig applies the same update, so all of them hold the
-same adapter throughout. When the run ends it is in `<data_dir>/train/runs/<run_name>/final` on every rig (the copies
-are identical; take any).
+Each rig loads its own 4-bit copy of the base model on one GPU and joins PyTorch's distributed training with the other
+rigs that are training right now. On every step each rig works through its own examples, the adapter's gradients are
+averaged over the network, and every rig applies the same update, so all of them hold the same adapter throughout.
+When the run ends it is in `<data_dir>/train/runs/<run_name>/final` on every rig that was there (the copies are
+identical; take any).
+
+It is made to run in the idle time between rentals: the run goes on with whichever rigs are on this flight sheet,
+down to one, and stops only while none is (see [Rigs leaving and joining](#rigs-leaving-and-joining)).
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `mode` | `serve` | `train` for a training run; the Ollama settings above are then unused. `export`: see [Serving a trained model](#serving-a-trained-model) |
 | `base` | none, required | Hugging Face repo of the base model. A `-bnb-4bit` repo is a ~18 GB download instead of ~56 GB |
 | `dataset` | none, required | `http(s)://` URL of a `.jsonl` every rig can reach, or a path on the rig |
-| `coordinator` | none, required | LAN address of the rig the others meet at. Same value on every rig, itself included |
-| `nodes` | `2` | How many rigs take part. The run only moves while all of them are there |
+| `peers` | none, required | LAN addresses of all rigs of the run, comma-separated. Same value on every rig, itself included |
 | `run_name` | `run1` | Folder of the run. A finished run stays finished: set a new name to train again |
 | `epochs` | `3` | Passes over the dataset |
 | `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory |
 | `lora_r` | `16` | Adapter rank |
 | `lr` | `2e-4` | Peak learning rate (10 warm-up steps, then linear to 0) |
-| `grad_accum` | `4` | Examples per rig per step, so a step is `grad_accum` x `nodes` examples |
-| `save_steps` | `25` | Steps between checkpoints |
-| `train_port` | `29400` | Port on the coordinator. The firewall rules guard this port in train mode |
+| `grad_accum` | `4` | Examples per rig per step when all rigs are there. A step is always `grad_accum` x the number of `peers` examples: with rigs away, the ones left each do more of it |
+| `save_steps` | `25` | Steps between checkpoints. A stop saves too, so this only matters for a crash or a power cut |
+| `train_port` | `29400` | Port the rigs meet on. The firewall rules guard this port in train mode |
 | `torch_index` | `cu128` | PyTorch wheel index. `cu128` needs NVIDIA driver 570 or newer (an RTX 5090 needs it anyway) |
 
 `gpus`, `allow`, `bind`, `data_dir`, `reset_oc` and `allow_docker` work as when serving. `gpus` defaults to `0` here:
@@ -220,22 +221,40 @@ refuse to start together if their copies differ.
 PyTorch and the packages in `requirements-train.txt` (about 8 GB), and the base model. A rig switched to another
 flight sheet keeps them for the next run.
 
-**A rig leaving** (a flight sheet switch, a crash, a reboot) stops the step for all rigs. The others retry every 30 s
-and carry on when it is back, from the last checkpoint. Every rig keeps its own checkpoint; if they differ, all of them
-continue from the furthest one, which is sent over the network to the rigs that lack it. So the coordinator can be any
-rig, and a rig can even be swapped for another mid-run.
-
 **Dashboard:** 1 H/s per GPU while training, with the progress in the algo field (`qlora training step 120/900 loss
 1.234`). The loss in each rig's log is over that rig's examples only.
 
 **Network.** A rank 16 adapter on a 27B model is about 110 M weights, and each rig sends them once per step (~450 MB).
 On 1 Gbit/s that is several seconds a step, so a higher `grad_accum` means less time on the wire per example; 2.5 or
 10 Gbit/s between the rigs helps directly. The firewall rules cover `train_port` only: the GPU-to-GPU traffic uses
-ports chosen at run time, which are as open as the rig leaves them, and anything `allow` admits can join a run.
+ports chosen at run time (the first is one of the 8 after `train_port`), which are as open as the rig leaves them,
+and anything `allow` admits can join a run.
 
-**Tested** so far only on CPU: two workers through the same `torchrun` command, with a small model, including a
-restart mid-run and a rig that lost its checkpoint. Not yet run on the rigs: the 4-bit load of a 27B model, memory use
-at `max_len=2048` on 24 GB, and the traffic between two real GPUs.
+### Rigs leaving and joining
+
+A rental, a reboot or a flight sheet switch can take any rig at any time, and it comes back when it is idle again.
+No rig has to stay: the run pauses only while every rig is away.
+
+- **A rig is stopped** (Octa stops the miner for a rental): its worker tells the others before the next example,
+  every rig saves, and the rest carry on without it about half a minute later, plus the time to load the model again.
+  Nothing trained is lost. The stopped rig frees its GPU as soon as it has saved, normally within seconds; after 40 s
+  it is killed regardless.
+- **A rig comes back:** the others save, and all start again together. It takes the newest checkpoint over the
+  network if its own is older.
+- **A rig dies without warning** (power, a crash): the others lose the steps since the last checkpoint
+  (`save_steps`), and notice within seconds, or after 20 minutes without a finished step in the worst case.
+- **Who is in charge:** nobody in particular. One rig hosts the meeting on `train_port` (the lowest address, when
+  several start together); when it leaves, another takes over within about 10 seconds.
+- **Rigs that are never idle together** each continue from their own checkpoint. When two such rigs meet again, the
+  one that got further wins and the other's steps since they last trained together are dropped. If that would cost
+  you much, keep one rig on this flight sheet.
+- Every change of the group costs each rig a reload of the model, a minute or more for a 27B. Rentals that start and
+  stop every few minutes would leave little time for training.
+
+**Tested** so far only on CPU, with a small model and two rigs on one machine: training together, one joining a run in
+progress, one stopped mid-run (the other went on at the same step), the hosting rig stopped (the other took over),
+and both finishing with identical adapters. Not yet run on the rigs: the 4-bit load of a 27B model, memory use at
+`max_len=2048` on 24 GB, and the traffic between two real GPUs.
 
 ## Serving a trained model
 
@@ -300,7 +319,8 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 ## Files
 
 - `h-run.sh`: start-up checks, then runs Ollama, or the training run
-- `h-train.sh`: `mode=train`: installs the training environment and runs `train.py` through `torchrun`
+- `h-train.sh`: `mode=train`: installs the training environment and runs `meet.py`
+- `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
 - `train.py`: one worker of the QLoRA run
 - `requirements-train.txt`: the Python packages of the training environment
 - `h-export.sh`: `mode=export`: makes an Ollama model of a finished run

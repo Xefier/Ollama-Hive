@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""One worker of a QLoRA run shared between rigs. h-train.sh starts it on every rig through torchrun.
+"""One worker of a QLoRA run shared between rigs. meet.py starts it on every rig, for h-train.sh.
 
 Each worker holds its own 4-bit copy of the base model on its GPU. Only the adapter's gradients cross the network:
 DistributedDataParallel averages them on every optimizer step, so every worker ends each step with the same adapter.
-Every rig saves that adapter to its own disk, which is how a run survives any rig leaving: on the next start the
-workers compare checkpoints and all continue from the furthest one (sync_checkpoint).
+
+Rigs come and go (a rental takes one, it comes back when idle), so nothing here depends on how many take part:
+- Progress is counted in examples seen, and a step is always grad_accum x nodes examples however many rigs share it.
+- Every rig saves the adapter to its own disk. On every start the workers compare checkpoints and all continue from
+  the furthest one (sync_checkpoint).
+- A rig told to stop says so to the others before the next example, and all of them save first (the stop flag).
 
 Dataset: JSON lines, each {"messages": [{"role": ..., "content": ...}, ...]} or {"text": "..."}.
 """
@@ -17,6 +21,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import time
 import urllib.request
@@ -35,6 +40,7 @@ def parse_args():
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--grad-accum", type=int, default=4)
+    parser.add_argument("--nodes", type=int, default=1, help="rigs of the run when all take part")
     parser.add_argument("--save-steps", type=int, default=25)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--state-file")
@@ -138,8 +144,8 @@ def sha256_file(path):
 def fingerprint(args, dataset_sha, torch_version):
     """What every rig of a run must agree on. A checkpoint also carries it, so a run_name can't continue with other
     settings."""
-    parts = [args.base, dataset_sha, args.epochs, args.max_len, args.lora_r, args.lr, args.grad_accum, args.seed,
-             torch_version]
+    parts = [args.base, dataset_sha, args.epochs, args.max_len, args.lora_r, args.lr, args.grad_accum, args.nodes,
+             args.seed, torch_version]
     return int(hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:15], 16)
 
 
@@ -151,7 +157,7 @@ def all_equal(dist, torch, value, device):
     return high.item() == low.item(), high.item()
 
 
-def local_checkpoint_step(args, print_of_settings):
+def local_checkpoint_seen(args, print_of_settings):
     meta_path = os.path.join(args.run_dir, "checkpoint.json")
     if not (os.path.exists(meta_path) and os.path.exists(os.path.join(args.run_dir, "checkpoint.pt"))):
         return -1
@@ -160,22 +166,23 @@ def local_checkpoint_step(args, print_of_settings):
     if meta.get("fingerprint") != print_of_settings:
         sys.exit(f"{args.run_dir} holds a checkpoint made with another base model, dataset or settings: "
                  "set a new run_name, or delete that folder to start this one again")
-    return int(meta["step"])
+    return int(meta["seen"])
 
 
-def write_checkpoint(args, blob, step, print_of_settings):
+def write_checkpoint(args, blob, seen, print_of_settings):
     path = os.path.join(args.run_dir, "checkpoint.pt")
     with open(path + ".tmp", "wb") as handle:
         handle.write(blob)
     os.replace(path + ".tmp", path)
     write_line(os.path.join(args.run_dir, "checkpoint.json"),
-               json.dumps({"step": step, "fingerprint": print_of_settings}))
+               json.dumps({"seen": seen, "fingerprint": print_of_settings}))
 
 
 def sync_checkpoint(dist, torch, args, device, rank, world, writer, print_of_settings):
-    """Every worker continues from the furthest checkpoint any rig has. Rigs save at the same steps, so normally all
-    have it; one that was away, or is new to the run, gets it over the network from the lowest rank that has it."""
-    local = local_checkpoint_step(args, print_of_settings)
+    """Every worker continues from the furthest checkpoint any rig here has. Rigs that train together save together,
+    so they normally all have it; one that was away, or is new to the run, gets it over the network from the lowest
+    rank that has it. A rig that trained alone meanwhile and got less far loses that stretch."""
+    local = local_checkpoint_seen(args, print_of_settings)
     same, best = all_equal(dist, torch, local, device)
     if best < 0:
         return None
@@ -204,7 +211,7 @@ def sync_checkpoint(dist, torch, args, device, rank, world, writer, print_of_set
         del part
     if rank != source:
         blob = bytes(received)
-        log(f"Took the step {best} checkpoint from rank {source} (this rig had step {local})")
+        log(f"Took the checkpoint at {best} examples from rank {source} (this rig was at {local})")
         if writer:
             write_checkpoint(args, blob, best, print_of_settings)
     return torch.load(io.BytesIO(blob), map_location="cpu", weights_only=True)
@@ -292,7 +299,6 @@ def main():
     import torch
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
-    from torch.utils.data.distributed import DistributedSampler
 
     cuda = torch.cuda.is_available()
     rank = int(os.environ.get("RANK", 0))
@@ -300,6 +306,21 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", 1))
     writer = local_rank == 0  # one worker per rig writes that rig's files
     device = torch.device(f"cuda:{local_rank}" if cuda else "cpu")
+
+    # A stop (the flight sheet ending, or meet.py regrouping because a rig joined) is only noted here. The loop
+    # passes it on to the other rigs and saves, between two examples.
+    stopping = []
+    in_loop = []
+
+    def on_stop(*_):
+        # Before the loop there is nothing new to save, and loading the model can't be interrupted politely
+        if not in_loop:
+            raise SystemExit(75)
+        stopping.append(1)
+
+    for number in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(number, on_stop)
+
     dist.init_process_group("nccl" if cuda else "gloo")
     if writer:
         write_line(args.state_file, "syncing")
@@ -319,89 +340,133 @@ def main():
     named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
     parameters = [p for _, p in named]
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=0.0)
-    step = 0
+    seen = 0
     if state:
         with torch.no_grad():
             for name, parameter in named:
                 parameter.copy_(state["adapter"][name])
         optimizer.load_state_dict(state["optimizer"])
-        step = int(state["step"])
+        seen = int(state["seen"])
         del state
+    saved = seen
     ddp = DistributedDataParallel(model, device_ids=[local_rank] if cuda else None)
 
-    sampler = DistributedSampler(examples, shuffle=True, seed=args.seed)
-    per_epoch = math.ceil(len(sampler) / args.grad_accum)
-    total = per_epoch * args.epochs
-    warmup = min(10, max(1, total // 10))
+    # A step is the same number of examples whoever is here, so the rigs present split it: alone, a rig does it all
+    step_examples = args.grad_accum * args.nodes
+    per_rig = math.ceil(step_examples / world)
+    total = len(examples) * args.epochs
+    total_steps = math.ceil(total / step_examples)
+    warmup = min(10 * step_examples, total // 10)
 
     def rate(at):
         if at < warmup:
-            return args.lr * (at + 1) / warmup
+            return args.lr * (at + step_examples) / (warmup + step_examples)
         return args.lr * max(0.0, (total - at) / max(1, total - warmup))
 
-    def save():
-        buffer = io.BytesIO()
-        torch.save({"step": step, "adapter": {name: p.detach().cpu() for name, p in named},
-                    "optimizer": optimizer.state_dict()}, buffer)
-        write_checkpoint(args, buffer.getvalue(), step, print_of_settings)
+    # One order of the examples per epoch, the same on every rig and at every rig count: example number i of the run
+    # is always the same example
+    orders = {}
 
-    log(f"{world} workers, {len(examples)} examples, {total} steps of {args.grad_accum} x {world} examples; "
-        f"starting at step {step}")
+    def example(number):
+        epoch = number // len(examples)
+        if epoch not in orders:
+            orders.clear()
+            generator = torch.Generator().manual_seed(args.seed + epoch)
+            orders[epoch] = torch.randperm(len(examples), generator=generator).tolist()
+        return examples[orders[epoch][number % len(examples)]]
+
+    def someone_stops():
+        flag = torch.tensor([1 if stopping else 0], dtype=torch.int64, device=device)
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        return flag.item() > 0
+
+    def save():
+        nonlocal saved
+        if not writer or saved == seen:
+            return
+        buffer = io.BytesIO()
+        torch.save({"seen": seen, "adapter": {name: p.detach().cpu() for name, p in named},
+                    "optimizer": optimizer.state_dict()}, buffer)
+        write_checkpoint(args, buffer.getvalue(), seen, print_of_settings)
+        saved = seen
+
+    def progress():
+        return f"step {min(seen // step_examples, total_steps)}/{total_steps}"
+
+    log(f"{world} of {args.nodes} rigs, {len(examples)} examples, {total_steps} steps of {step_examples} examples "
+        f"({per_rig} per rig now); starting at {progress()}")
     if writer:
+        write_line(args.status_file, f"{progress()}, {world}/{args.nodes} rigs")
         write_line(args.state_file, "training")
     model.train()
+    in_loop.append(1)
     started = time.time()
-    first_step = step
+    first_seen = seen
+    steps_done = 0
+    interrupted = False
     try:
-        while step < total:
-            sampler.set_epoch(step // per_epoch)
-            order = list(sampler)
-            for begin in range((step % per_epoch) * args.grad_accum, len(order), args.grad_accum):
-                group = order[begin:begin + args.grad_accum]
-                for entry in optimizer.param_groups:
-                    entry["lr"] = rate(step)
-                optimizer.zero_grad(set_to_none=True)
-                loss_sum = 0.0
-                for position, index in enumerate(group):
-                    ids, labels = examples[index]
-                    ids = torch.tensor([ids], device=device)
-                    labels = torch.tensor([labels], device=device)
-                    # Gradients cross the network once per step, with the last example, not once per example
-                    last = position == len(group) - 1
-                    with contextlib.ExitStack() as stack:
-                        if not last:
-                            stack.enter_context(ddp.no_sync())
-                        if cuda:
-                            stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
-                        loss = ddp(input_ids=ids, labels=labels).loss / len(group)
-                        if not last:
-                            loss.backward()
-                    if last:
+        while seen < total and not interrupted:
+            for entry in optimizer.param_groups:
+                entry["lr"] = rate(seen)
+            optimizer.zero_grad(set_to_none=True)
+            loss_sum = 0.0
+            for position in range(per_rig):
+                # Asked before every example, so a rig leaving costs the others at most the step in progress
+                if someone_stops():
+                    interrupted = True
+                    break
+                ids, labels = example(seen + position * world + rank)
+                ids = torch.tensor([ids], device=device)
+                labels = torch.tensor([labels], device=device)
+                # Gradients cross the network once per step, with the last example, not once per example
+                last = position == per_rig - 1
+                with contextlib.ExitStack() as stack:
+                    if not last:
+                        stack.enter_context(ddp.no_sync())
+                    if cuda:
+                        stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
+                    loss = ddp(input_ids=ids, labels=labels).loss / per_rig
+                    if not last:
                         loss.backward()
-                    loss_sum += loss.item()
-                torch.nn.utils.clip_grad_norm_(parameters, 1.0)
-                optimizer.step()
-                step += 1
-                pace = (time.time() - started) / (step - first_step)
-                # The loss is over this rig's examples of the step; the other rigs log theirs
-                status = f"step {step}/{total} loss {loss_sum:.3f}"
-                log(f"{status} lr {rate(step - 1):.2e} {pace:.1f} s/step, "
-                    f"{(total - step) * pace / 3600:.1f} h left")
-                if writer:
-                    write_line(args.status_file, status)
-                    if step % args.save_steps == 0 or step == total:
-                        save()
+                if last:
+                    loss.backward()
+                loss_sum += loss.item()
+            if interrupted:
+                break
+            torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+            optimizer.step()
+            seen += per_rig * world
+            steps_done += 1
+            pace = (time.time() - started) / (seen - first_seen) * step_examples
+            # The loss is over this rig's examples of the step; the other rigs log theirs
+            status = f"{progress()} loss {loss_sum:.3f}"
+            log(f"{status} lr {rate(seen - 1):.2e} {pace:.1f} s/step, "
+                f"{max(0, total - seen) / step_examples * pace / 3600:.1f} h left")
+            if writer:
+                write_line(args.status_file, f"{status}, {world}/{args.nodes} rigs")
+            if steps_done % args.save_steps == 0 or seen >= total:
+                save()
     except torch.OutOfMemoryError:
         if writer:
             write_line(args.status_file, "out of GPU memory: lower max_len")
         log(f"Out of GPU memory at max_len={args.max_len}: lower max_len (or lora_r) on every rig")
         sys.exit(3)
+    except Exception:
+        # Usually a rig that vanished mid-step. The adapter is still as the last whole step left it.
+        save()
+        raise
+
+    if interrupted:
+        save()
+        log(f"Stopped at {progress()} because a rig is leaving or joining; saved")
+        # Not 0: to meet.py that would mean the run is finished
+        sys.exit(75)
 
     if writer:
         final = os.path.join(args.run_dir, "final")
         model.save_pretrained(final)
         tokenizer.save_pretrained(final)
-        write_line(os.path.join(args.run_dir, "done"), f"step {step}")
+        write_line(os.path.join(args.run_dir, "done"), progress())
         log(f"Finished. The adapter is in {final}")
     dist.destroy_process_group()
 
