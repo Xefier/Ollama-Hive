@@ -10,6 +10,7 @@
   --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series: #2a78d6; --idle: #c3c2b7;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -52,6 +53,18 @@ table { border-collapse: collapse; width: 100%; margin-top: 8px; font-variant-nu
 th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); }
 th { color: var(--ink-2); font-weight: 500; }
 th:first-child, td:first-child { text-align: left; }
+.share { padding: 8px 0; border-top: 1px solid var(--grid); }
+.share:first-of-type { border-top: 0; }
+.share-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.share .note { margin: 6px 0 0; color: var(--ink-2); }
+.level { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.level i { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
+  font-style: normal; font-size: 11px; font-weight: 700; color: #fff; }
+.level.warning i { color: #0b0b0b; }
+.bar { display: flex; gap: 2px; height: 12px; margin-top: 6px; }
+.bar span { min-width: 2px; }
+.bar span:first-child { border-radius: 2px 0 0 2px; }
+.bar span:last-child { border-radius: 0 2px 2px 0; }
 .empty { color: var(--ink-2); padding: 24px 0; text-align: center; }
 </style>
 </head>
@@ -61,6 +74,12 @@ th:first-child, td:first-child { text-align: left; }
   <p class="sub" id="sub">Asking the rigs…</p>
   <div class="rigs" id="rigs"></div>
   <div class="tiles" id="tiles"></div>
+  <div class="card"><h2>Where each rig's step time goes</h2>
+    <p class="note" id="shares-note"></p>
+    <div class="legend"><span><i style="background:var(--series)"></i>Computing on the GPU</span>
+      <span><i style="background:var(--idle)"></i>Waiting for a slower rig</span>
+      <span><i style="background:var(--ink-2)"></i>Sending gradients over the network (coloured by how much)</span></div>
+    <div id="shares"></div></div>
   <div class="card"><h2>Training loss</h2><p class="note" id="loss-note"></p><div class="chart" id="loss"></div></div>
   <div class="card"><h2>Steps left to train</h2>
     <p class="note">Rises when examples are added to the dataset, falls as the rigs train them.</p><div class="chart" id="left"></div></div>
@@ -79,6 +98,13 @@ const query = new URLSearchParams(location.search);
 const port = query.get("port") || location.port || "29410";
 const rigs = new Map();   // address -> {next, lines, status}
 const POLL = 15000;
+const SHARE_STEPS = 100;      // the steps the time shares are taken over
+// Share of a step spent on the network from which it is worth a look, and from which it holds the run up
+const NETWORK_LEVELS = [
+  { from: 0.35, name: "critical", icon: "✕", text: "Holds the run up: a faster link between the rigs would pay off" },
+  { from: 0.15, name: "warning", icon: "!", text: "Worth a look" },
+  { from: 0, name: "good", icon: "✓", text: "Fine" },
+];
 const AWAY_AFTER = 30 * 60;   // a training rig silent this long has gone without saying so
 
 function $(id) { return document.getElementById(id); }
@@ -170,6 +196,32 @@ function thinned(points, most) {
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+}
+
+// How a rig's step time divides, over its latest steps with other rigs. Alone, a rig sends nothing.
+function timeShares(rig) {
+  const steps = rig.lines.filter(line => line.e === "step" && line.rigs > 1 && line.dur > 0 && line.net !== undefined).slice(-SHARE_STEPS);
+  if (!steps.length) return null;
+  const total = name => steps.reduce((sum, line) => sum + (line[name] || 0), 0);
+  const network = total("net") / total("dur"), waiting = total("wait") / total("dur");
+  return { steps: steps.length, perStep: total("dur") / steps.length, network, waiting, computing: Math.max(0, 1 - network - waiting) };
+}
+
+function sharesRow(address, rig) {
+  const shares = timeShares(rig);
+  if (!shares) {
+    return `<div class="share"><div class="share-head"><b>${address}</b></div>
+      <p class="note">${rig.status ? "No steps together with another rig yet. A rig training alone sends nothing."
+        : "Not answering, so its steps aren't known here."}</p></div>`;
+  }
+  const level = NETWORK_LEVELS.find(entry => shares.network >= entry.from);
+  const percent = value => `${Math.round(value * 100)}%`;
+  const part = (value, color) => value >= 0.005 ? `<span style="flex:${value};background:${color}"></span>` : "";
+  return `<div class="share"><div class="share-head"><b>${address}</b>
+      <span class="level ${level.name}"><i style="background:var(--${level.name})">${level.icon}</i>Network ${percent(shares.network)} · ${level.text}</span></div>
+    <div class="bar">${part(shares.computing, "var(--series)")}${part(shares.waiting, "var(--idle)")}${part(shares.network, `var(--${level.name})`)}</div>
+    <p class="note">Computing ${percent(shares.computing)} · waiting for a slower rig ${percent(shares.waiting)} · network ${percent(shares.network)}
+      · ${shares.perStep.toFixed(1)} s per step, over its last ${shares.steps} step${shares.steps > 1 ? "s" : ""} with other rigs</p></div>`;
 }
 
 // Stretches of training and waiting of one rig. Between them it was away.
@@ -362,6 +414,10 @@ function render() {
     ["Rigs training now", `${answering.filter(rig => rig.status.state === "training").length} of ${rigs.size}`],
   ];
   $("tiles").innerHTML = tiles.map(([label, value]) => `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`).join("");
+
+  $("shares-note").textContent = `Network under ${NETWORK_LEVELS[1].from * 100}% of a step is fine; over ${NETWORK_LEVELS[0].from * 100}% it holds the run up.`
+    + " The network share is an estimate: what the example that sends the gradients took beyond the others of its step.";
+  $("shares").innerHTML = [...rigs].map(([address, rig]) => sharesRow(address, rig)).join("");
 
   $("loss-note").textContent = width > 1 ? `Each point is the average of the last ${width} steps. Lower is better; it only measures the examples being trained.`
     : "Lower is better; it only measures the examples being trained.";

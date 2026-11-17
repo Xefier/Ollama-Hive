@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.7.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.8.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -273,7 +273,11 @@ step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's 
 **Progress page.** Every rig on the training flight sheet serves one at `http://<rig>:29410/` (`train_port` + 10;
 the miner log has the link). Open it from any rig, on any device on the LAN: it asks all `peers` and draws them
 together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
-the size of the dataset, and when each rig was training, waiting or away. A rented rig doesn't answer and its part
+the size of the dataset, and when each rig was training, waiting or away. It also shows, per rig, how a step's time
+divides between computing, waiting for a slower rig, and sending the gradients over the network, with the network
+share marked fine (under 15%), worth a look, or holding the run up (over 35%): that is where to see whether the link
+between the rigs is worth upgrading. The network share is an estimate, taken from how much longer the example that
+sends the gradients takes than the other examples of its step. A rented rig doesn't answer and its part
 of the history is missing until it is back; with every rig rented there is no page. Each rig keeps its history in
 `<data_dir>/train/runs/<run_name>/history.jsonl`, one line per step. The page is read-only, and like the training
 ports it is as open as the rig leaves it: anything on the LAN can read the run's progress.

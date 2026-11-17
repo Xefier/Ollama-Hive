@@ -504,14 +504,13 @@ def main():
     def progress():
         return f"step {seen // step_examples}, {math.ceil(left() / step_examples)} to go"
 
-    def note(event, loss=None):
+    def note(event, **more):
         """A line of this rig's history: what it did when, for the progress page."""
         if not writer:
             return
         line = {"t": round(time.time()), "e": event, "step": seen // step_examples, "left": left(),
                 "n": len(examples), "rigs": world, "size": step_examples}
-        if loss is not None:
-            line["loss"] = round(loss, 4)
+        line.update({key: round(value, 4) for key, value in more.items() if value is not None})
         with open(os.path.join(args.run_dir, "history.jsonl"), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")
 
@@ -575,11 +574,22 @@ def main():
                 entry["lr"] = rate(seen)
             optimizer.zero_grad(set_to_none=True)
             loss_sum = 0.0
+            # Where the step's time goes, for the progress page. waited: in the question before every example, where
+            # a faster rig stands still until the slowest is ready. network: what the example that sends the
+            # gradients took beyond what its tokens take without sending, going by this step's other examples.
+            step_began = time.time()
+            waited = 0.0
+            network = None
+            plain_time = 0.0
+            plain_tokens = 0
             for position, key in enumerate(batch[rank::world]):
                 # Asked before every example, so a rig leaving costs the others at most the step in progress
+                asked = time.time()
                 if position and tell_all(STOP if stopping else 0) == STOP:
                     stopped = True
                     break
+                example_began = time.time()
+                waited += example_began - asked
                 ids, labels = examples[key]
                 ids = torch.tensor([ids], device=device)
                 labels = torch.tensor([labels], device=device)
@@ -595,7 +605,14 @@ def main():
                         loss.backward()
                 if last:
                     loss.backward()
+                # Reading the loss waits for the GPU, so the time is this example's
                 loss_sum += loss.item()
+                took = time.time() - example_began
+                if not last:
+                    plain_time += took
+                    plain_tokens += ids.shape[1]
+                elif plain_tokens and world > 1:
+                    network = max(0.0, took - plain_time / plain_tokens * ids.shape[1])
             if stopped:
                 break
             torch.nn.utils.clip_grad_norm_(parameters, 1.0)
@@ -607,7 +624,7 @@ def main():
             pace = (time.time() - started) / (seen - first_seen) * step_examples
             # The loss is over this rig's examples of the step; the other rigs log theirs
             status = f"{progress()} loss {loss_sum:.3f}"
-            note("step", loss_sum)
+            note("step", loss=loss_sum, dur=time.time() - step_began, wait=waited, net=network)
             log(f"{status} lr {rate(seen - 1):.2e} {pace:.1f} s/step, {left() / step_examples * pace / 3600:.1f} h left")
             if writer:
                 write_line(args.status_file, f"{status}, {world}/{args.nodes} rigs")
