@@ -1,0 +1,8 @@
+# The training environment of mode=train. PyTorch is installed first, from its own index (torch_index=).
+# Every rig of a run installs from this file, and train.py refuses to start if their PyTorch versions differ.
+transformers>=5.0
+peft>=0.17
+bitsandbytes>=0.46
+accelerate>=1.8
+safetensors
+huggingface_hub

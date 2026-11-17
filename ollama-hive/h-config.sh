@@ -8,6 +8,18 @@ ollama_hive_valid() {
     case "$1" in
         model)                          [[ $2 =~ ^[A-Za-z0-9._:/-]+$ ]] ;;
         num_ctx|num_parallel|port)      [[ $2 =~ ^[0-9]+$ ]] ;;
+        mode)                           [[ $2 =~ ^(serve|train|export)$ ]] ;;
+        base|full_base)                 [[ $2 =~ ^[A-Za-z0-9._/-]+$ ]] ;;
+        export_name)                    [[ $2 =~ ^[A-Za-z0-9._:/-]+$ ]] ;;
+        quant)                          [[ $2 =~ ^[A-Za-z0-9_]+$ ]] ;;
+        llama_cpp)                      [[ $2 =~ ^b[0-9]+$ ]] ;;
+        # No & ; or quotes: h-run.sh sources this value
+        dataset)                        [[ $2 =~ ^(https?://[A-Za-z0-9._:/%=+?-]+|/[A-Za-z0-9._/-]+)$ ]] ;;
+        coordinator)                    [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && $2 != 0.0.0.0 ]] ;;
+        nodes|train_port|epochs|max_len|lora_r|grad_accum|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
+        lr)                             [[ $2 =~ ^[0-9]+(\.[0-9]+)?(e-?[0-9]+)?$ ]] ;;
+        run_name)                       [[ $2 =~ ^[A-Za-z0-9._-]+$ ]] ;;
+        torch_index)                    [[ $2 =~ ^(cu[0-9]+|cpu)$ ]] ;;
         allow)                          [[ $2 =~ ^[0-9./,]+$ ]] ;;
         data_dir)                       [[ $2 =~ ^/[A-Za-z0-9._/-]+$ ]] ;;
         ollama_version)                 [[ $2 =~ ^[A-Za-z0-9.+-]+$ ]] ;;

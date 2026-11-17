@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 
-# Runs Ollama in the foreground of Hive's miner screen, so switching flight sheet starts and stops it.
-# Nothing here installs a system service: with another flight sheet active, Ollama is not running and holds no GPU memory.
+# Runs Ollama in the foreground of Hive's miner screen, so switching flight sheet starts and stops it. With mode=train
+# it runs a shared QLoRA run instead (h-train.sh); with mode=export it first makes that run's model (h-export.sh).
+# Nothing here installs a system service: with another flight sheet active, nothing of it is running or holds GPU memory.
 
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 . ./h-common.sh
+. ./h-train.sh
+. ./h-export.sh
 
 LOG_FILE="$CUSTOM_LOG_BASENAME.log"
 mkdir -p "$CUSTOM_LOG_BASEDIR" "$OH_RUN_DIR"
@@ -65,9 +68,19 @@ wait_for_blocker() {
 }
 
 find_settings_problem() {
-    [[ -n $OH_MODEL ]] || { echo "No model set: add model=<name> to the flight sheet's Extra config arguments"; return; }
-    [[ $OH_KV_CACHE_TYPE =~ ^q && $OH_FLASH_ATTENTION == 0 ]] \
-        && { echo "kv_cache_type=$OH_KV_CACHE_TYPE needs flash attention: remove flash_attention=0"; return; }
+    local problem
+    if [[ $OH_MODE == train ]]; then
+        problem=$(find_train_settings_problem)
+        [[ -n $problem ]] && { echo "$problem"; return; }
+    else
+        if [[ $OH_MODE == export ]]; then
+            problem=$(find_export_settings_problem)
+            [[ -n $problem ]] && { echo "$problem"; return; }
+        fi
+        [[ -n $OH_MODEL ]] || { echo "No model set: add model=<name> to the flight sheet's Extra config arguments"; return; }
+        [[ $OH_KV_CACHE_TYPE =~ ^q && $OH_FLASH_ATTENTION == 0 ]] \
+            && { echo "kv_cache_type=$OH_KV_CACHE_TYPE needs flash attention: remove flash_attention=0"; return; }
+    fi
     [[ -n $(oh_lan_address) ]] || { echo "No private LAN address found: set bind=<address> in the flight sheet"; return; }
     command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU' \
         || echo "No NVIDIA GPU found: this miner only supports NVIDIA"
@@ -156,9 +169,9 @@ apply_firewall() {
         "$command" -A "$OH_CHAIN" -s "$cidr" -j ACCEPT || return 1
     done
     "$command" -A "$OH_CHAIN" -j DROP || return 1
-    "$command" -I INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN" || return 1
+    "$command" -I INPUT -p tcp --dport "$OH_GUARD_PORT" -j "$OH_CHAIN" || return 1
     "$command" -S "$OH_CHAIN" >/dev/null || return 1
-    "$command" -C INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN"
+    "$command" -C INPUT -p tcp --dport "$OH_GUARD_PORT" -j "$OH_CHAIN"
 }
 
 # A second layer: the server only listens on the private address anyway, so a default setup still runs without working
@@ -175,7 +188,7 @@ open_firewall() {
         for command in iptables iptables-legacy; do
             command -v "$command" >/dev/null 2>&1 || continue
             if apply_firewall "$command" "$allow" >> "$LOG_FILE" 2>&1; then
-                log "Firewall set with $command: port $OH_PORT is open to: $allow"
+                log "Firewall set with $command: port $OH_GUARD_PORT is open to: $allow"
                 return 0
             fi
             log "$command could not set the firewall rules"
@@ -187,7 +200,7 @@ open_firewall() {
         log "allow=$OH_ALLOW can't be enforced on this rig without working firewall rules"
         return 1
     fi
-    notify warn "No working firewall on this rig: anything on the LAN can reach port $OH_PORT"
+    notify warn "No working firewall on this rig: anything on the LAN can reach port $OH_GUARD_PORT"
     return 0
 }
 
@@ -284,11 +297,19 @@ report_placement() {
 wait_for_blocker find_settings_problem
 wait_for_blocker find_gpu_user
 
-until install_ollama; do
-    notify warn "Could not install Ollama, retrying in 60 s. See the miner log."
-    oh_set_state waiting
-    pause 60
-done
+if [[ $OH_MODE == train ]]; then
+    until install_train_env; do
+        notify warn "Could not install the training environment, retrying in 60 s. See the miner log."
+        oh_set_state waiting
+        pause 60
+    done
+else
+    until install_ollama; do
+        notify warn "Could not install Ollama, retrying in 60 s. See the miner log."
+        oh_set_state waiting
+        pause 60
+    done
+fi
 
 check_gpu_tuning
 
@@ -304,8 +325,31 @@ stop_watchdog
 tail -n 0 -F "$LOG_FILE" 2>/dev/null &
 echo "$!" > "$OH_RUN_DIR/tail.pid"
 
+# Never returns
+[[ $OH_MODE == train ]] && train_loop
+
+export_told=""
 while true; do
     oh_set_state starting
+    if [[ $OH_MODE == export ]] && start_server; then
+        if export_model; then
+            # From here on this is serving, of the model just made (or made by an earlier start)
+            OH_MODEL=$OH_EXPORT_NAME
+            OH_MODE=serve
+        else
+            kill -TERM -- "-$SERVER_PID" 2>/dev/null
+            if [[ -z $export_told ]]; then
+                notify warn "Could not make $OH_EXPORT_NAME from run $OH_RUN_NAME: retrying every 5 min. See the miner log."
+                export_told=1
+            fi
+            oh_set_state waiting
+            pause 300
+            continue
+        fi
+        # The serving below starts its own server, once this one has let go of the port
+        kill -TERM -- "-$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+    fi
     if start_server && prepare_model; then
         report_placement
         oh_set_state ready

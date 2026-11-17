@@ -1,14 +1,16 @@
 # Ollama-Hive
 
 A Hive OS custom miner that runs Ollama instead of mining, so a rig switches between Octa and serving a local model by
-changing flight sheet. `client/local_llm_mcp.py` lets Claude sessions on other PCs delegate to it.
+changing flight sheet. `client/local_llm_mcp.py` lets Claude sessions on other PCs delegate to it. With `mode=train` the
+same miner fine-tunes a model instead, as one QLoRA run shared between rigs (see [Training](#training)), and
+`mode=export` turns the result into an Ollama model (see [Serving a trained model](#serving-a-trained-model)).
 
 NVIDIA only. Ollama runs in the foreground of Hive's miner screen and no system service is installed, so with another
 flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.4.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.5.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -168,6 +170,121 @@ a million tokens the local model read instead, so it sets the dashboard's price 
 and page source moved to the `local-llm-dashboard` skill in `Xefier/claude-dashboards`, which says how both numbers
 reach the dashboard.
 
+## Training
+
+`mode=train` turns the flight sheet into one worker of a QLoRA fine-tune. Put the same settings on every rig that takes
+part, for example:
+
+```
+mode=train
+base=unsloth/Qwen3.8-27B-unsloth-bnb-4bit
+dataset=http://192.168.1.50:8000/train.jsonl
+coordinator=192.168.1.189
+nodes=2
+run_name=unity-1
+```
+
+Each rig loads its own 4-bit copy of the base model on one GPU and runs PyTorch's `torchrun`; the rigs meet at
+`coordinator`, which is simply the LAN address of one of them. On every step each rig works through its own examples,
+the adapter's gradients are averaged over the network, and every rig applies the same update, so all of them hold the
+same adapter throughout. When the run ends it is in `<data_dir>/train/runs/<run_name>/final` on every rig (the copies
+are identical; take any).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `mode` | `serve` | `train` for a training run; the Ollama settings above are then unused. `export`: see [Serving a trained model](#serving-a-trained-model) |
+| `base` | none, required | Hugging Face repo of the base model. A `-bnb-4bit` repo is a ~18 GB download instead of ~56 GB |
+| `dataset` | none, required | `http(s)://` URL of a `.jsonl` every rig can reach, or a path on the rig |
+| `coordinator` | none, required | LAN address of the rig the others meet at. Same value on every rig, itself included |
+| `nodes` | `2` | How many rigs take part. The run only moves while all of them are there |
+| `run_name` | `run1` | Folder of the run. A finished run stays finished: set a new name to train again |
+| `epochs` | `3` | Passes over the dataset |
+| `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory |
+| `lora_r` | `16` | Adapter rank |
+| `lr` | `2e-4` | Peak learning rate (10 warm-up steps, then linear to 0) |
+| `grad_accum` | `4` | Examples per rig per step, so a step is `grad_accum` x `nodes` examples |
+| `save_steps` | `25` | Steps between checkpoints |
+| `train_port` | `29400` | Port on the coordinator. The firewall rules guard this port in train mode |
+| `torch_index` | `cu128` | PyTorch wheel index. `cu128` needs NVIDIA driver 570 or newer (an RTX 5090 needs it anyway) |
+
+`gpus`, `allow`, `bind`, `data_dir`, `reset_oc` and `allow_docker` work as when serving. `gpus` defaults to `0` here:
+one GPU per rig; list more (`gpus=0,1`) for one worker per GPU.
+
+**Dataset.** One JSON object per line: `{"messages": [{"role": "user", "content": "..."}, {"role": "assistant",
+"content": "..."}]}` (a system message and earlier turns are fine), or `{"text": "..."}` for raw text. With messages,
+the model learns only the last assistant message; what comes before is context. From a worker PC, `python -m
+http.server 8000` in the dataset's folder is enough to serve it. A URL is downloaded once per `run_name`, and the rigs
+refuse to start together if their copies differ.
+
+**What it installs,** all under `<data_dir>/train` and nothing into the system: `uv`, a Python 3.12 it manages,
+PyTorch and the packages in `requirements-train.txt` (about 8 GB), and the base model. A rig switched to another
+flight sheet keeps them for the next run.
+
+**A rig leaving** (a flight sheet switch, a crash, a reboot) stops the step for all rigs. The others retry every 30 s
+and carry on when it is back, from the last checkpoint. Every rig keeps its own checkpoint; if they differ, all of them
+continue from the furthest one, which is sent over the network to the rigs that lack it. So the coordinator can be any
+rig, and a rig can even be swapped for another mid-run.
+
+**Dashboard:** 1 H/s per GPU while training, with the progress in the algo field (`qlora training step 120/900 loss
+1.234`). The loss in each rig's log is over that rig's examples only.
+
+**Network.** A rank 16 adapter on a 27B model is about 110 M weights, and each rig sends them once per step (~450 MB).
+On 1 Gbit/s that is several seconds a step, so a higher `grad_accum` means less time on the wire per example; 2.5 or
+10 Gbit/s between the rigs helps directly. The firewall rules cover `train_port` only: the GPU-to-GPU traffic uses
+ports chosen at run time, which are as open as the rig leaves them, and anything `allow` admits can join a run.
+
+**Tested** so far only on CPU: two workers through the same `torchrun` command, with a small model, including a
+restart mid-run and a rig that lost its checkpoint. Not yet run on the rigs: the 4-bit load of a 27B model, memory use
+at `max_len=2048` on 24 GB, and the traffic between two real GPUs.
+
+## Serving a trained model
+
+Ollama 0.34.1 and newer refuse LoRA adapters, so a run's adapter can't be loaded next to the stock model. `mode=export`
+builds it into the model instead, then serves the result like `mode=serve` does:
+
+```
+mode=export
+model=qwen3.8:27b
+full_base=Qwen/Qwen3.8-27B
+run_name=unity-1
+export_name=qwen3.8-unity:27b
+num_ctx=65536
+```
+
+The adapter is folded into the base model's own weights, so the new model has exactly as many weights as the stock one:
+at the same quantization it takes the same VRAM and runs at the same speed. Only the values differ.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `model` | none, required | The stock Ollama model the run was trained from. Its Modelfile (renderer, parser, parameters) and vision projector are reused |
+| `full_base` | none, required | Hugging Face repo of the base model at full precision, not the `-bnb-4bit` one used for training |
+| `run_name` | `run1` | The finished run to export |
+| `export_name` | the `run_name` | Name of the Ollama model to make |
+| `quant` | `Q4_K_M` | Quantization, as `llama-quantize` names them. Use the stock model's to match its VRAM |
+| `llama_cpp` | `b12477` | llama.cpp release used to convert and quantize |
+
+The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the first start the rig:
+
+1. downloads `full_base` one weights file at a time and adds the adapter to each (never more than one file in memory,
+   no second copy of the base on disk);
+2. converts the merged model to GGUF and quantizes it with llama.cpp, installed under `<data_dir>/train/convert`;
+3. imports it with `ollama create`, using the stock model's Modelfile with only the weights swapped.
+
+Then, and on every later start, it finds `export_name` already there and just serves it, so the flight sheet can stay
+on `mode=export`. Plain `mode=serve` with `model=<export_name>` works too once it exists.
+
+It needs about 2.4 x the base model's size free on the data drive while it runs (about 135 GB for a 27B model) and
+checks before starting; all of it but the final model (17 GB at Q4_K_M) is deleted afterwards. A stopped export
+continues where it was. The export runs on each rig that should serve the model: a rig that didn't train needs the
+run's `final` folder copied to `<data_dir>/train/runs/<run_name>/final` first.
+
+The merge is done at the base model's own 16-bit precision, like PEFT's and Unsloth's exports.
+
+**Tested** in WSL (Ubuntu 20.04) with a small model: the whole flow with llama.cpp's real converter and
+`llama-quantize`, against a stand-in for the `ollama` binary, and the merged weights are bit-identical to PEFT's own
+merge. Not yet run: a 27B model, and Ollama's import of the result (a new weights file next to the stock projector,
+renderer and parser).
+
 ## Checks on a rig
 
 ```bash
@@ -182,7 +299,12 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 
 ## Files
 
-- `h-run.sh`: start-up checks, then runs Ollama
+- `h-run.sh`: start-up checks, then runs Ollama, or the training run
+- `h-train.sh`: `mode=train`: installs the training environment and runs `train.py` through `torchrun`
+- `train.py`: one worker of the QLoRA run
+- `requirements-train.txt`: the Python packages of the training environment
+- `h-export.sh`: `mode=export`: makes an Ollama model of a finished run
+- `export.py`: merges the adapter into the base model's weights
 - `h-stop.sh`: puts the rig back; safe to run repeatedly
 - `h-guard.sh`: runs `h-stop.sh` if `h-run.sh` is killed, and keeps the watchdog off meanwhile
 - `h-stats.sh`: dashboard stats

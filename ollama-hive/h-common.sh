@@ -31,7 +31,37 @@ OH_RESET_OC=0
 OH_ALLOW_DOCKER=0
 OH_BIND=""
 
+# mode=train: a QLoRA run shared between rigs instead of serving. See h-train.sh.
+OH_MODE=serve
+OH_BASE=""
+OH_DATASET=""
+OH_COORDINATOR=""
+OH_NODES=2
+OH_TRAIN_PORT=29400
+OH_RUN_NAME=run1
+OH_EPOCHS=3
+OH_MAX_LEN=2048
+OH_LORA_R=16
+OH_LR=2e-4
+OH_GRAD_ACCUM=4
+OH_SAVE_STEPS=25
+OH_TORCH_INDEX=cu128
+# mode=export: the Ollama model made of a finished run. See h-export.sh.
+OH_FULL_BASE=""
+OH_EXPORT_NAME=""
+OH_QUANT=Q4_K_M
+OH_LLAMA_CPP=b12477
+
 [[ -f $CUSTOM_CONFIG_FILENAME ]] && . "$CUSTOM_CONFIG_FILENAME"
+
+[[ -n $OH_EXPORT_NAME ]] || OH_EXPORT_NAME=$OH_RUN_NAME
+
+# The port the firewall rules guard: Ollama's, or in train mode the one the rigs meet on
+OH_GUARD_PORT=$OH_PORT
+[[ $OH_MODE == train ]] && OH_GUARD_PORT=$OH_TRAIN_PORT
+OH_TRAIN_DIR="$OH_DATA_DIR/train"
+OH_VENV="$OH_TRAIN_DIR/venv"
+OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
 
 OH_BIN="$OH_DATA_DIR/bin/ollama"
 # The address h-run.sh is serving on. Ollama doesn't listen on 127.0.0.1 here, so this is how to reach it on the rig too.
@@ -65,11 +95,14 @@ oh_lan_address() {
 }
 
 oh_remove_firewall() {
-    local command i
+    local command port i
     for command in iptables iptables-legacy; do
         command -v "$command" >/dev/null 2>&1 || continue
-        for (( i = 0; i < 20; i++ )); do
-            "$command" -D INPUT -p tcp --dport "$OH_PORT" -j "$OH_CHAIN" 2>/dev/null || break
+        # Both ports: the flight sheet may have changed mode since the rules were added
+        for port in "$OH_PORT" "$OH_TRAIN_PORT"; do
+            for (( i = 0; i < 20; i++ )); do
+                "$command" -D INPUT -p tcp --dport "$port" -j "$OH_CHAIN" 2>/dev/null || break
+            done
         done
         "$command" -F "$OH_CHAIN" 2>/dev/null
         "$command" -X "$OH_CHAIN" 2>/dev/null
