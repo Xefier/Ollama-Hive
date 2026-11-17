@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.5.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.6.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -186,23 +186,25 @@ run_name=unity-1
 Each rig loads its own 4-bit copy of the base model on one GPU and joins PyTorch's distributed training with the other
 rigs that are training right now. On every step each rig works through its own examples, the adapter's gradients are
 averaged over the network, and every rig applies the same update, so all of them hold the same adapter throughout.
-When the run ends it is in `<data_dir>/train/runs/<run_name>/final` on every rig that was there (the copies are
-identical; take any).
+It is in `<data_dir>/train/runs/<run_name>/adapter` on every rig, written again at every checkpoint.
 
-It is made to run in the idle time between rentals: the run goes on with whichever rigs are on this flight sheet,
-down to one, and stops only while none is (see [Rigs leaving and joining](#rigs-leaving-and-joining)).
+**The run has no end.** It is made to train for weeks on a dataset that something else keeps adding to (see
+[A dataset that grows](#a-dataset-that-grows)): it waits for the dataset to appear, trains every example `epochs`
+times, waits for more, and goes on when they arrive. It is also made for the idle time between rentals: the run goes
+on with whichever rigs are on this flight sheet, down to one, and pauses only while none is (see
+[Rigs leaving and joining](#rigs-leaving-and-joining)).
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `mode` | `serve` | `train` for a training run; the Ollama settings above are then unused. `export`: see [Serving a trained model](#serving-a-trained-model) |
 | `base` | none, required | Hugging Face repo of the base model. A `-bnb-4bit` repo is a ~18 GB download instead of ~56 GB |
-| `dataset` | none, required | `http(s)://` URL of a `.jsonl` every rig can reach, or a path on the rig |
+| `dataset` | none, required | `http(s)://` URL of a `.jsonl`, or a path on the rig. It doesn't have to be there yet, and one rig reaching it is enough |
 | `peers` | none, required | LAN addresses of all rigs of the run, comma-separated. Same value on every rig, itself included |
-| `run_name` | `run1` | Folder of the run. A finished run stays finished: set a new name to train again |
-| `epochs` | `3` | Passes over the dataset |
+| `run_name` | `run1` | Folder of the run. A new name starts again from the base model |
+| `epochs` | `3` | Times each example is trained |
 | `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory |
 | `lora_r` | `16` | Adapter rank |
-| `lr` | `2e-4` | Peak learning rate (10 warm-up steps, then linear to 0) |
+| `lr` | `2e-4` | Learning rate, reached over 10 warm-up steps and then held: there is no end to come down to |
 | `grad_accum` | `4` | Examples per rig per step when all rigs are there. A step is always `grad_accum` x the number of `peers` examples: with rigs away, the ones left each do more of it |
 | `save_steps` | `25` | Steps between checkpoints. A stop saves too, so this only matters for a crash or a power cut |
 | `train_port` | `29400` | Port the rigs meet on. The firewall rules guard this port in train mode |
@@ -214,21 +216,43 @@ one GPU per rig; list more (`gpus=0,1`) for one worker per GPU.
 **Dataset.** One JSON object per line: `{"messages": [{"role": "user", "content": "..."}, {"role": "assistant",
 "content": "..."}]}` (a system message and earlier turns are fine), or `{"text": "..."}` for raw text. With messages,
 the model learns only the last assistant message; what comes before is context. From a worker PC, `python -m
-http.server 8000` in the dataset's folder is enough to serve it. A URL is downloaded once per `run_name`, and the rigs
-refuse to start together if their copies differ.
+http.server 8000` in the dataset's folder is enough to serve it.
+
+### A dataset that grows
+
+Whatever produces the examples only has to keep one `.jsonl` up to date at `dataset`; the rigs know nothing else
+about it.
+
+- **Not there yet:** the rigs load the model and wait (`qlora idle step 0, waiting for the dataset`).
+- **New examples:** every rig that can reach `dataset` looks at it once a minute. The one that finds a newer file
+  hands it to the others, and all go on with it between two steps, without reloading the model. A rig coming back
+  from a rental gets the newest copy from the rigs that are there, so the PC that serves the file can be off for a
+  while.
+- **What is trained next:** always the examples trained the fewest times, so new ones go first and each ends up
+  trained `epochs` times. A step that the new examples don't fill is filled up with older ones, the least trained
+  first. Those get an extra pass that way, which also keeps the model from drifting towards the latest examples.
+- **Nothing left:** the rigs keep the model loaded and wait (`waiting for new examples`), at idle power.
+- **An example is its line.** Appending lines is the normal case. A changed line counts as a new example, and a
+  removed one is simply no longer trained; what the model learned from it stays. Lines that are not an example are
+  skipped and counted in the log, so a file read while its last line is half written does no harm.
+- **Newer** means the file's modification time, as the web server or the rig's disk reports it.
+
+What can be used at any time is the `adapter` folder: `mode=export` makes an Ollama model of the run as it stands
+(see [Serving a trained model](#serving-a-trained-model)).
 
 **What it installs,** all under `<data_dir>/train` and nothing into the system: `uv`, a Python 3.12 it manages,
 PyTorch and the packages in `requirements-train.txt` (about 8 GB), and the base model. A rig switched to another
 flight sheet keeps them for the next run.
 
-**Dashboard:** 1 H/s per GPU while training, with the progress in the algo field (`qlora training step 120/900 loss
-1.234`). The loss in each rig's log is over that rig's examples only.
+**Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
+step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
 
 **Network.** A rank 16 adapter on a 27B model is about 110 M weights, and each rig sends them once per step (~450 MB).
 On 1 Gbit/s that is several seconds a step, so a higher `grad_accum` means less time on the wire per example; 2.5 or
 10 Gbit/s between the rigs helps directly. The firewall rules cover `train_port` only: the GPU-to-GPU traffic uses
 ports chosen at run time (the first is one of the 8 after `train_port`), which are as open as the rig leaves them,
-and anything `allow` admits can join a run.
+and anything `allow` admits can join a run. Rigs take the dataset from each other as well as from `dataset`, so
+whatever can join a run can also feed it examples.
 
 ### Rigs leaving and joining
 
@@ -239,8 +263,8 @@ No rig has to stay: the run pauses only while every rig is away.
   every rig saves, and the rest carry on without it about half a minute later, plus the time to load the model again.
   Nothing trained is lost. The stopped rig frees its GPU as soon as it has saved, normally within seconds; after 40 s
   it is killed regardless.
-- **A rig comes back:** the others save, and all start again together. It takes the newest checkpoint over the
-  network if its own is older.
+- **A rig comes back:** the others save, and all start again together. It takes the newest checkpoint and the newest
+  dataset over the network if its own are older.
 - **A rig dies without warning** (power, a crash): the others lose the steps since the last checkpoint
   (`save_steps`), and notice within seconds, or after 20 minutes without a finished step in the worst case.
 - **Who is in charge:** nobody in particular. One rig hosts the meeting on `train_port` (the lowest address, when
@@ -253,7 +277,8 @@ No rig has to stay: the run pauses only while every rig is away.
 
 **Tested** so far only on CPU, with a small model and two rigs on one machine: training together, one joining a run in
 progress, one stopped mid-run (the other went on at the same step), the hosting rig stopped (the other took over),
-and both finishing with identical adapters. Not yet run on the rigs: the 4-bit load of a 27B model, memory use at
+waiting for a dataset that isn't there yet, taking up examples added during the run (on a rig that can't reach the
+source too), and both ending up with identical adapters. Not yet run on the rigs: the 4-bit load of a 27B model, memory use at
 `max_len=2048` on 24 GB, and the traffic between two real GPUs.
 
 ## Serving a trained model
@@ -277,7 +302,7 @@ at the same quantization it takes the same VRAM and runs at the same speed. Only
 |---|---|---|
 | `model` | none, required | The stock Ollama model the run was trained from. Its Modelfile (renderer, parser, parameters) and vision projector are reused |
 | `full_base` | none, required | Hugging Face repo of the base model at full precision, not the `-bnb-4bit` one used for training |
-| `run_name` | `run1` | The finished run to export |
+| `run_name` | `run1` | The run to export, as it stands on this rig |
 | `export_name` | the `run_name` | Name of the Ollama model to make |
 | `quant` | `Q4_K_M` | Quantization, as `llama-quantize` names them. Use the stock model's to match its VRAM |
 | `llama_cpp` | `b12477` | llama.cpp release used to convert and quantize |
@@ -290,12 +315,13 @@ The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the fi
 3. imports it with `ollama create`, using the stock model's Modelfile with only the weights swapped.
 
 Then, and on every later start, it finds `export_name` already there and just serves it, so the flight sheet can stay
-on `mode=export`. Plain `mode=serve` with `model=<export_name>` works too once it exists.
+on `mode=export`. Plain `mode=serve` with `model=<export_name>` works too once it exists. For a run that has trained
+further since, give a new `export_name` (and `ollama rm` the old model when it is no longer wanted).
 
 It needs about 2.4 x the base model's size free on the data drive while it runs (about 135 GB for a 27B model) and
 checks before starting; all of it but the final model (17 GB at Q4_K_M) is deleted afterwards. A stopped export
 continues where it was. The export runs on each rig that should serve the model: a rig that didn't train needs the
-run's `final` folder copied to `<data_dir>/train/runs/<run_name>/final` first.
+run's `adapter` folder copied to `<data_dir>/train/runs/<run_name>/adapter` first.
 
 The merge is done at the base model's own 16-bit precision, like PEFT's and Unsloth's exports.
 
@@ -323,7 +349,7 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 - `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
 - `train.py`: one worker of the QLoRA run
 - `requirements-train.txt`: the Python packages of the training environment
-- `h-export.sh`: `mode=export`: makes an Ollama model of a finished run
+- `h-export.sh`: `mode=export`: makes an Ollama model of a run
 - `export.py`: merges the adapter into the base model's weights
 - `h-stop.sh`: puts the rig back; safe to run repeatedly
 - `h-guard.sh`: runs `h-stop.sh` if `h-run.sh` is killed, and keeps the watchdog off meanwhile

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# mode=export, sourced by h-run.sh: makes the Ollama model <export_name> out of a finished training run, then h-run.sh
-# serves it like any other. Ollama no longer loads LoRA adapters, so the adapter is merged into the full-precision
+# mode=export, sourced by h-run.sh: makes the Ollama model <export_name> out of a training run as it stands, then
+# h-run.sh serves it like any other. Ollama no longer loads LoRA adapters, so the adapter is merged into the full-precision
 # base model (export.py), converted to GGUF and quantized with llama.cpp, and imported with the stock model's
 # Modelfile. Once the model exists none of this runs again, so the flight sheet can stay on mode=export.
 
@@ -78,9 +78,9 @@ export_has_space() {
 export_model() {
     "$OH_BIN" show "$OH_EXPORT_NAME" >/dev/null 2>&1 && return 0
 
-    local adapter="$OH_RUN_PATH/final"
+    local adapter="$OH_RUN_PATH/adapter"
     if [[ ! -f $adapter/adapter_model.safetensors ]]; then
-        log "No finished run $OH_RUN_NAME on this rig: $adapter has no adapter. Copy it from a rig that trained, or check run_name"
+        log "No run $OH_RUN_NAME on this rig: $adapter has no adapter. Copy it from a rig that trained, or check run_name"
         return 1
     fi
     export HF_HOME="$OH_TRAIN_DIR/hf"

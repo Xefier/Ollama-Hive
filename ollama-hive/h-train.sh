@@ -3,6 +3,7 @@
 # mode=train, sourced by h-run.sh: this rig is one worker of a QLoRA run shared between the rigs in peers=, all with
 # the same settings. train.py does the training; meet.py starts it, and starts it again whenever the group changes.
 # Rigs come and go as rentals take them, so no rig is special: the run goes on with whichever are here, down to one.
+# The run has no end: the dataset grows while it trains, and with nothing left to train the workers wait for more.
 # Nothing is installed into the system: Python, PyTorch, the base model and the run are all under $OH_TRAIN_DIR.
 
 find_train_settings_problem() {
@@ -59,7 +60,7 @@ install_train_env() {
     echo "$wanted" > "$stamp"
 }
 
-# Runs meet.py, which trains with whichever rigs are there, until the run is finished or something breaks
+# Runs meet.py, which trains with whichever rigs are there, until something breaks
 train_once() {
     local address interface gpus workers
     address=$(oh_lan_address)
@@ -88,7 +89,7 @@ train_once() {
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status")
 
     oh_set_state preparing
-    log "Fetching the dataset and $OH_BASE if they aren't on disk. Free space: $(df -h --output=avail "$OH_DATA_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')"
+    log "Fetching $OH_BASE if it isn't on disk, and the dataset if it is there. Free space: $(df -h --output=avail "$OH_DATA_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')"
     setsid "$OH_VENV/bin/python" "$OH_DIR/train.py" "${arguments[@]}" --prepare >> "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
@@ -106,10 +107,11 @@ train_once() {
 
     while kill -0 "$SERVER_PID" 2>/dev/null; do
         pause 20
-        # A rig that lost power mid-step can leave the others waiting on it for good
-        if [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) == training ]] \
+        # A rig that lost power mid-step can leave the others waiting on it for good. train.py writes its status
+        # after every step, and every few seconds while it has nothing to train.
+        if [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) =~ ^(training|idle)$ ]] \
             && [[ -n $(find "$OH_RUN_DIR/train-status" -mmin +20 2>/dev/null) ]]; then
-            log "No step finished in 20 minutes: starting the attempt again"
+            log "No sign of life from the training in 20 minutes: starting the attempt again"
             oh_stop_group "$SERVER_PID" 40
             return 1
         fi
@@ -117,26 +119,16 @@ train_once() {
     wait "$SERVER_PID"
 }
 
-# meet.py handles rigs joining and leaving by itself, so it only ends when the run is finished or on an error. Every
-# start continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
+# meet.py handles rigs joining and leaving by itself and the run has no end, so it only ends on an error. Every start
+# continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
 train_loop() {
     local told=""
     while true; do
-        if [[ -f $OH_RUN_PATH/done ]]; then
-            oh_set_state done
-            if [[ $told != done ]]; then
-                notify info "Run $OH_RUN_NAME is finished: the adapter is in $OH_RUN_PATH/final. Set a new run_name to train again"
-                told=done
-            fi
-            pause 60
-            continue
-        fi
         oh_set_state starting
         train_once
         oh_stop_group "$SERVER_PID" 5
-        [[ -f $OH_RUN_PATH/done ]] && continue
         # It got as far as training, so this is a new stretch of failures
-        [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) == training ]] && told=""
+        [[ $(cat "$OH_RUN_DIR/state" 2>/dev/null) =~ ^(training|idle)$ ]] && told=""
         if [[ $told != stopped ]]; then
             notify warn "Training stopped on an error: trying again every 10 s. See the miner log."
             told=stopped

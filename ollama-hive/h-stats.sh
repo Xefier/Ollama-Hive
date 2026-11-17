@@ -2,7 +2,8 @@
 
 # Sourced by Hive's agent, which reads $khs and $stats. Must stay quick and must not exit.
 # There is no hashrate, so each GPU reports 1 H/s while the model is loaded and answering (or, with mode=train, while
-# the run is training), and 0 otherwise: a glance at the dashboard shows whether the service is up.
+# the run is training, not while it waits for new examples), and 0 otherwise: a glance at the dashboard shows whether
+# the service is up.
 
 . "$(dirname "${BASH_SOURCE[0]}")/h-common.sh"
 
@@ -12,7 +13,7 @@ oh_started=$(cat "$OH_RUN_DIR/started" 2>/dev/null)
 oh_algo="ollama ${oh_state:-stopped}"
 if [[ $OH_MODE == train ]]; then
     oh_loaded=0
-    # train.py's last "step 120/900 loss 1.234"
+    # train.py's last "step 120, 780 to go loss 1.234"
     oh_algo="qlora ${oh_state:-stopped} $(cat "$OH_RUN_DIR/train-status" 2>/dev/null)"
     oh_algo=${oh_algo% }
 else

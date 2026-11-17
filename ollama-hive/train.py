@@ -4,17 +4,25 @@
 Each worker holds its own 4-bit copy of the base model on its GPU. Only the adapter's gradients cross the network:
 DistributedDataParallel averages them on every optimizer step, so every worker ends each step with the same adapter.
 
+The run has no end. The dataset grows while it trains: every example is trained --epochs times, the least trained
+first, and when all have been the workers stay loaded and wait for more (next_batch). The dataset's source is looked
+at every minute, and the rig that finds a newer one hands it to the others (sync_dataset), so only one rig has to
+reach it. A source that isn't there yet is the same as an empty one: the workers wait.
+
 Rigs come and go (a rental takes one, it comes back when idle), so nothing here depends on how many take part:
-- Progress is counted in examples seen, and a step is always grad_accum x nodes examples however many rigs share it.
+- A step is always grad_accum x nodes examples however many rigs share it, and which examples it takes follows from
+  how often each has been trained, which the checkpoint records.
 - Every rig saves the adapter to its own disk. On every start the workers compare checkpoints and all continue from
   the furthest one (sync_checkpoint).
 - A rig told to stop says so to the others before the next example, and all of them save first (the stop flag).
 
-Dataset: JSON lines, each {"messages": [{"role": ..., "content": ...}, ...]} or {"text": "..."}.
+Dataset: JSON lines, each {"messages": [{"role": ..., "content": ...}, ...]} or {"text": "..."}. An example is known
+by its line: a changed line is a new example.
 """
 
 import argparse
 import contextlib
+import email.utils
 import hashlib
 import io
 import json
@@ -23,11 +31,17 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 import urllib.request
 
 VISION_OR_HEAD = re.compile(r"(^|\.)(visual|vision\w*|merger|multi_modal_projector|lm_head|mtp\w*)(\.|$)")
 CHUNK = 256 * 1024 * 1024
+CHECK = 60          # seconds between looks at the dataset's source
+IDLE = 5            # seconds between looks at the other rigs while there is nothing to train
+WARMUP_STEPS = 10
+# What a worker tells the others before an example; the highest wins
+NEW_DATA, STOP = 1, 2
 
 
 def parse_args():
@@ -35,7 +49,7 @@ def parse_args():
     parser.add_argument("--base", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=3, help="times each example is trained")
     parser.add_argument("--max-len", type=int, default=2048)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -46,7 +60,7 @@ def parse_args():
     parser.add_argument("--state-file")
     parser.add_argument("--status-file")
     parser.add_argument("--prepare", action="store_true",
-                        help="download the dataset and the base model, check the dataset, then exit")
+                        help="download the base model and the dataset if it is there, report on it, then exit")
     return parser.parse_args()
 
 
@@ -62,39 +76,81 @@ def write_line(path, text):
     os.replace(path + ".tmp", path)
 
 
-def dataset_file(args):
-    """A URL is downloaded once per run folder, so a run never changes data halfway: new data means a new run_name."""
-    if not re.match(r"https?://", args.dataset):
-        return args.dataset
-    path = os.path.join(args.run_dir, "dataset.jsonl")
-    if not os.path.exists(path):
-        log(f"Downloading {args.dataset}")
-        with urllib.request.urlopen(args.dataset, timeout=60) as response, open(path + ".tmp", "wb") as out:
-            while True:
-                block = response.read(1 << 20)
-                if not block:
-                    break
-                out.write(block)
-        os.replace(path + ".tmp", path)
-    return path
+def dataset_path(args):
+    """The run's own copy of the dataset: what this rig trains on, whether it came from the source or another rig."""
+    return os.path.join(args.run_dir, "dataset.jsonl")
 
 
-def read_rows(path):
-    rows = []
-    with open(path, encoding="utf-8") as handle:
-        for number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError as error:
-                sys.exit(f"{path} line {number} is not JSON: {error}")
-            if not isinstance(row, dict) or not ("messages" in row or "text" in row):
-                sys.exit(f'{path} line {number} needs "messages" or "text"')
-            rows.append(row)
-    if not rows:
-        sys.exit(f"{path} has no examples")
-    return rows
+def dataset_meta(args):
+    """version: when the source was last changed, as the source says, so the same on every rig. -1 with no copy."""
+    try:
+        with open(dataset_path(args) + ".json", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        if os.path.exists(dataset_path(args)):
+            return meta
+    except (OSError, ValueError):
+        pass
+    return {"version": -1, "sha": ""}
+
+
+def write_dataset(args, data, version, modified=None):
+    with open(dataset_path(args) + ".tmp", "wb") as handle:
+        handle.write(data)
+    os.replace(dataset_path(args) + ".tmp", dataset_path(args))
+    write_line(dataset_path(args) + ".json", json.dumps(
+        {"version": version, "sha": hashlib.sha256(data).hexdigest(), "modified": modified}))
+
+
+def refresh_dataset(args):
+    """Takes the dataset from its source if that is newer than the run's copy. False when it isn't, and when the
+    source can't be read: it may not exist yet, or the PC serving it may be off."""
+    have = dataset_meta(args)
+    modified = None
+    try:
+        if re.match(r"https?://", args.dataset):
+            request = urllib.request.Request(args.dataset)
+            if have.get("modified"):
+                # Unchanged is then answered without the file (an error 304, caught below)
+                request.add_header("If-Modified-Since", have["modified"])
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = response.read()
+                modified = response.headers.get("Last-Modified")
+            version = int(email.utils.parsedate_to_datetime(modified).timestamp()) if modified else int(time.time())
+        else:
+            version = int(os.path.getmtime(args.dataset))
+            if version < have["version"]:
+                return False
+            with open(args.dataset, "rb") as handle:
+                data = handle.read()
+    except (OSError, ValueError):
+        return False
+    if version < have["version"] or hashlib.sha256(data).hexdigest() == have["sha"]:
+        return False
+    # Changed twice within the second the source's clock counts in
+    version = max(version, have["version"] + 1)
+    write_dataset(args, data, version, modified)
+    return True
+
+
+def read_rows(data):
+    """The examples by key. A line that is no example is left out instead of stopping the run: the file is written to
+    while the run reads it, and its last line may be half there."""
+    rows = {}
+    bad = 0
+    for line in data.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            bad += 1
+            continue
+        if isinstance(row, dict) and ("messages" in row or "text" in row):
+            rows[hashlib.sha1(line).hexdigest()[:16]] = row
+        else:
+            bad += 1
+    return rows, bad
 
 
 def encode(tokenizer, row):
@@ -120,31 +176,34 @@ def encode(tokenizer, row):
     return ids, labels
 
 
-def encode_all(tokenizer, rows, max_len):
-    """Examples over max_len are left out, not cut: an answer cut off halfway teaches the model to stop halfway."""
-    examples = []
+def encode_all(tokenizer, data, max_len, encoded):
+    """The dataset's examples as token ids by key, and a line on what was left out. Examples over max_len are left
+    out, not cut: an answer cut off halfway teaches the model to stop halfway. encoded keeps what earlier calls
+    worked out, so a dataset that grew costs only its new lines."""
+    rows, bad = read_rows(data)
+    examples = {}
     too_long = 0
-    for row in rows:
-        ids, labels = encode(tokenizer, row)
-        if len(ids) > max_len:
+    for key, row in rows.items():
+        if key not in encoded:
+            try:
+                ids, labels = encode(tokenizer, row)
+            except Exception:  # messages the chat template can't take
+                ids = []
+            encoded[key] = (ids, labels) if 1 < len(ids) <= max_len else len(ids)
+        if isinstance(encoded[key], tuple):
+            examples[key] = encoded[key]
+        elif encoded[key] > max_len:
             too_long += 1
-        elif len(ids) > 1:
-            examples.append((ids, labels))
-    return examples, too_long
+        else:
+            bad += 1
+    return examples, (f"{len(examples)} examples, {sum(len(ids) for ids, _ in examples.values())} tokens; "
+                      f"{too_long} left out for being over max_len={max_len}, {bad} for not being an example")
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def fingerprint(args, dataset_sha, torch_version):
+def fingerprint(args, torch_version):
     """What every rig of a run must agree on. A checkpoint also carries it, so a run_name can't continue with other
-    settings."""
-    parts = [args.base, dataset_sha, args.epochs, args.max_len, args.lora_r, args.lr, args.grad_accum, args.nodes,
+    settings. Not the dataset: that changes during a run, and the rigs pass it on (sync_dataset)."""
+    parts = [args.base, args.epochs, args.max_len, args.lora_r, args.lr, args.grad_accum, args.nodes,
              args.seed, torch_version]
     return int(hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:15], 16)
 
@@ -157,6 +216,53 @@ def all_equal(dist, torch, value, device):
     return high.item() == low.item(), high.item()
 
 
+def furthest(dist, torch, device, rank, world, score):
+    """Whether every worker has the same score, the highest score, and the lowest rank that has it."""
+    same, best = all_equal(dist, torch, score, device)
+    source = torch.tensor([rank if score == best else world], dtype=torch.int64, device=device)
+    dist.all_reduce(source, op=dist.ReduceOp.MIN)
+    return same, best, int(source.item())
+
+
+def broadcast_bytes(dist, torch, device, rank, source, blob):
+    """Sends the source rank's blob to every worker, and returns it on each."""
+    size = torch.tensor([len(blob)], dtype=torch.int64, device=device)
+    dist.broadcast(size, source)
+    received = bytearray()
+    for start in range(0, int(size.item()), CHUNK):
+        length = min(CHUNK, int(size.item()) - start)
+        part = torch.empty(length, dtype=torch.uint8, device=device)
+        if rank == source:
+            part.copy_(torch.frombuffer(bytearray(blob[start:start + length]), dtype=torch.uint8))
+        dist.broadcast(part, source)
+        if rank != source:
+            received += part.cpu().numpy().tobytes()
+        del part
+    return blob if rank == source else bytes(received)
+
+
+def read_file(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def sync_dataset(dist, torch, args, device, rank, world, writer):
+    """Every worker gets the newest dataset any rig here has, as bytes: empty when none has one yet."""
+    have = dataset_meta(args)
+    score = -1 if have["version"] < 0 else have["version"] << 28 | int(have["sha"][:7], 16)
+    same, best, source = furthest(dist, torch, device, rank, world, score)
+    if best < 0:
+        return b""
+    if same:
+        return read_file(dataset_path(args))
+    data = broadcast_bytes(dist, torch, device, rank, source, read_file(dataset_path(args)) if rank == source else b"")
+    if score != best:
+        log(f"Took the dataset from rank {source}")
+        if writer:
+            write_dataset(args, data, best >> 28)
+    return data
+
+
 def local_checkpoint_seen(args, print_of_settings):
     meta_path = os.path.join(args.run_dir, "checkpoint.json")
     if not (os.path.exists(meta_path) and os.path.exists(os.path.join(args.run_dir, "checkpoint.pt"))):
@@ -164,7 +270,7 @@ def local_checkpoint_seen(args, print_of_settings):
     with open(meta_path, encoding="utf-8") as handle:
         meta = json.load(handle)
     if meta.get("fingerprint") != print_of_settings:
-        sys.exit(f"{args.run_dir} holds a checkpoint made with another base model, dataset or settings: "
+        sys.exit(f"{args.run_dir} holds a checkpoint made with another base model or other settings: "
                  "set a new run_name, or delete that folder to start this one again")
     return int(meta["seen"])
 
@@ -183,34 +289,14 @@ def sync_checkpoint(dist, torch, args, device, rank, world, writer, print_of_set
     so they normally all have it; one that was away, or is new to the run, gets it over the network from the lowest
     rank that has it. A rig that trained alone meanwhile and got less far loses that stretch."""
     local = local_checkpoint_seen(args, print_of_settings)
-    same, best = all_equal(dist, torch, local, device)
+    same, best, source = furthest(dist, torch, device, rank, world, local)
     if best < 0:
         return None
     path = os.path.join(args.run_dir, "checkpoint.pt")
     if same:
         return torch.load(path, map_location="cpu", weights_only=True)
-
-    source = torch.tensor([rank if local == best else world], dtype=torch.int64, device=device)
-    dist.all_reduce(source, op=dist.ReduceOp.MIN)
-    source = int(source.item())
-    blob = b""
-    if rank == source:
-        with open(path, "rb") as handle:
-            blob = handle.read()
-    size = torch.tensor([len(blob)], dtype=torch.int64, device=device)
-    dist.broadcast(size, source)
-    received = bytearray()
-    for start in range(0, int(size.item()), CHUNK):
-        length = min(CHUNK, int(size.item()) - start)
-        part = torch.empty(length, dtype=torch.uint8, device=device)
-        if rank == source:
-            part.copy_(torch.frombuffer(bytearray(blob[start:start + length]), dtype=torch.uint8))
-        dist.broadcast(part, source)
-        if rank != source:
-            received += part.cpu().numpy().tobytes()
-        del part
+    blob = broadcast_bytes(dist, torch, device, rank, source, read_file(path) if rank == source else b"")
     if rank != source:
-        blob = bytes(received)
         log(f"Took the checkpoint at {best} examples from rank {source} (this rig was at {local})")
         if writer:
             write_checkpoint(args, blob, best, print_of_settings)
@@ -279,8 +365,6 @@ def add_adapter(torch, model, args):
 def main():
     args = parse_args()
     os.makedirs(args.run_dir, exist_ok=True)
-    data_path = dataset_file(args)
-    rows = read_rows(data_path)
 
     from transformers import AutoTokenizer
 
@@ -288,12 +372,13 @@ def main():
         from huggingface_hub import snapshot_download
 
         snapshot_download(args.base)
-        tokenizer = AutoTokenizer.from_pretrained(args.base)
-        examples, too_long = encode_all(tokenizer, rows, args.max_len)
-        log(f"Dataset: {len(examples)} examples, {sum(len(ids) for ids, _ in examples)} tokens; "
-            f"{too_long} left out for being over max_len={args.max_len}")
-        if not examples:
-            sys.exit("No example fits max_len")
+        refresh_dataset(args)
+        if dataset_meta(args)["version"] < 0:
+            log(f"No dataset at {args.dataset} yet: the run waits for it, or gets it from another rig")
+        else:
+            report = encode_all(AutoTokenizer.from_pretrained(args.base), read_file(dataset_path(args)),
+                                args.max_len, {})[1]
+            log(f"Dataset: {report}")
         return
 
     import torch
@@ -321,19 +406,30 @@ def main():
     for number in (signal.SIGTERM, signal.SIGINT):
         signal.signal(number, on_stop)
 
+    if writer:
+        refresh_dataset(args)
     dist.init_process_group("nccl" if cuda else "gloo")
     if writer:
         write_line(args.state_file, "syncing")
 
-    print_of_settings = fingerprint(args, sha256_file(data_path), torch.__version__)
+    print_of_settings = fingerprint(args, torch.__version__)
     same, _ = all_equal(dist, torch, print_of_settings, device)
     if not same:
-        sys.exit("The rigs disagree on the base model, the dataset's content, a training setting or the PyTorch "
-                 "version: give every rig the same flight sheet settings and the same dataset")
+        sys.exit("The rigs disagree on the base model, a training setting or the PyTorch version: give every rig "
+                 "the same flight sheet settings")
     state = sync_checkpoint(dist, torch, args, device, rank, world, writer, print_of_settings)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base)
-    examples, _ = encode_all(tokenizer, rows, args.max_len)
+    encoded = {}
+    examples = {}
+
+    def load_examples():
+        nonlocal examples
+        examples, report = encode_all(tokenizer, sync_dataset(dist, torch, args, device, rank, world, writer),
+                                      args.max_len, encoded)
+        log(f"Dataset: {report}")
+
+    load_examples()
     if writer:
         write_line(args.state_file, "loading")
     model = add_adapter(torch, load_model(torch, args, device, cuda), args)
@@ -341,12 +437,14 @@ def main():
     parameters = [p for _, p in named]
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=0.0)
     seen = 0
+    counts = {}  # times each example has been trained, by key
     if state:
         with torch.no_grad():
             for name, parameter in named:
                 parameter.copy_(state["adapter"][name])
         optimizer.load_state_dict(state["optimizer"])
         seen = int(state["seen"])
+        counts = dict(state["counts"])
         del state
     saved = seen
     ddp = DistributedDataParallel(model, device_ids=[local_rank] if cuda else None)
@@ -354,68 +452,120 @@ def main():
     # A step is the same number of examples whoever is here, so the rigs present split it: alone, a rig does it all
     step_examples = args.grad_accum * args.nodes
     per_rig = math.ceil(step_examples / world)
-    total = len(examples) * args.epochs
-    total_steps = math.ceil(total / step_examples)
-    warmup = min(10 * step_examples, total // 10)
 
     def rate(at):
-        if at < warmup:
-            return args.lr * (at + step_examples) / (warmup + step_examples)
-        return args.lr * max(0.0, (total - at) / max(1, total - warmup))
+        # No way down: the run has no end to come down to
+        return args.lr * min(1.0, (at // step_examples + 1) / (WARMUP_STEPS + 1))
 
-    # One order of the examples per epoch, the same on every rig and at every rig count: example number i of the run
-    # is always the same example
-    orders = {}
+    def left():
+        return sum(max(0, args.epochs - counts.get(key, 0)) for key in examples)
 
-    def example(number):
-        epoch = number // len(examples)
-        if epoch not in orders:
-            orders.clear()
-            generator = torch.Generator().manual_seed(args.seed + epoch)
-            orders[epoch] = torch.randperm(len(examples), generator=generator).tolist()
-        return examples[orders[epoch][number % len(examples)]]
+    def place(key):
+        # Shuffled among the examples trained as often, differently on every pass
+        times = counts.get(key, 0)
+        return times, hashlib.sha1(f"{args.seed}:{times}:{key}".encode()).digest()
 
-    def someone_stops():
-        flag = torch.tensor([1 if stopping else 0], dtype=torch.int64, device=device)
+    def next_batch(size):
+        """The least trained examples, the same on every rig and at every rig count since it follows from counts
+        alone. Empty when every example has had its --epochs. The last step before that is filled up with examples
+        that are already there, rather than leaving a rig without one."""
+        if not left():
+            return []
+        order = sorted(examples, key=place)
+        return [order[number % len(order)] for number in range(size)]
+
+    def tell_all(word):
+        flag = torch.tensor([word], dtype=torch.int64, device=device)
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
-        return flag.item() > 0
+        return int(flag.item())
+
+    adapter_dir = os.path.join(args.run_dir, "adapter")
 
     def save():
+        """The checkpoint to continue from, and the adapter as mode=export and PEFT read it. The adapter folder
+        says what it holds, since a checkpoint taken from another rig comes without one."""
         nonlocal saved
-        if not writer or saved == seen:
+        if not writer:
             return
-        buffer = io.BytesIO()
-        torch.save({"seen": seen, "adapter": {name: p.detach().cpu() for name, p in named},
-                    "optimizer": optimizer.state_dict()}, buffer)
-        write_checkpoint(args, buffer.getvalue(), seen, print_of_settings)
-        saved = seen
+        if saved != seen:
+            buffer = io.BytesIO()
+            torch.save({"seen": seen, "counts": counts, "adapter": {name: p.detach().cpu() for name, p in named},
+                        "optimizer": optimizer.state_dict()}, buffer)
+            write_checkpoint(args, buffer.getvalue(), seen, print_of_settings)
+            saved = seen
+        mark = os.path.join(adapter_dir, "examples-seen")
+        if seen and not (os.path.exists(mark) and open(mark).read().strip() == str(seen)):
+            model.save_pretrained(adapter_dir)
+            tokenizer.save_pretrained(adapter_dir)
+            write_line(mark, str(seen))
 
     def progress():
-        return f"step {min(seen // step_examples, total_steps)}/{total_steps}"
+        return f"step {seen // step_examples}, {math.ceil(left() / step_examples)} to go"
 
-    log(f"{world} of {args.nodes} rigs, {len(examples)} examples, {total_steps} steps of {step_examples} examples "
-        f"({per_rig} per rig now); starting at {progress()}")
+    def waiting_for():
+        return "new examples" if examples else "the dataset"
+
+    # The source is watched beside the training, which a PC that is off would otherwise hold up
+    new_data = threading.Event()
+
+    def watch_source():
+        while True:
+            time.sleep(CHECK)
+            if refresh_dataset(args):
+                new_data.set()
+
     if writer:
-        write_line(args.status_file, f"{progress()}, {world}/{args.nodes} rigs")
-        write_line(args.state_file, "training")
+        threading.Thread(target=watch_source, daemon=True).start()
+
+    log(f"{world} of {args.nodes} rigs, steps of {step_examples} examples ({per_rig} per rig now); "
+        f"starting at {progress()}")
+    save()
     model.train()
     in_loop.append(1)
-    started = time.time()
-    first_seen = seen
-    steps_done = 0
-    interrupted = False
+    idle = None
+    stopped = False
     try:
-        while seen < total and not interrupted:
+        while not stopped:
+            word = tell_all(STOP if stopping else NEW_DATA if new_data.is_set() else 0)
+            if word == STOP:
+                break
+            if word == NEW_DATA:
+                new_data.clear()
+                load_examples()
+                continue
+            batch = next_batch(per_rig * world)
+            if not batch:
+                if idle is not True:
+                    idle = True
+                    save()
+                    log(f"Nothing to train at {progress()}: waiting for {waiting_for()}")
+                    if writer:
+                        write_line(args.state_file, "idle")
+                if writer:
+                    # Written every time: h-train.sh takes a status that stops changing for a worker that hangs
+                    write_line(args.status_file,
+                               f"step {seen // step_examples}, waiting for {waiting_for()}, {world}/{args.nodes} rigs")
+                time.sleep(IDLE)
+                continue
+            if idle is not False:
+                idle = False
+                started = time.time()
+                first_seen = seen
+                steps_done = 0
+                if writer:
+                    write_line(args.status_file, f"{progress()}, {world}/{args.nodes} rigs")
+                    write_line(args.state_file, "training")
+
             for entry in optimizer.param_groups:
                 entry["lr"] = rate(seen)
             optimizer.zero_grad(set_to_none=True)
             loss_sum = 0.0
-            for position in range(per_rig):
+            for position, key in enumerate(batch[rank::world]):
                 # Asked before every example, so a rig leaving costs the others at most the step in progress
-                if someone_stops():
-                    interrupted = True
+                if position and tell_all(STOP if stopping else 0) == STOP:
+                    stopped = True
                     break
-                ids, labels = example(seen + position * world + rank)
+                ids, labels = examples[key]
                 ids = torch.tensor([ids], device=device)
                 labels = torch.tensor([labels], device=device)
                 # Gradients cross the network once per step, with the last example, not once per example
@@ -431,20 +581,21 @@ def main():
                 if last:
                     loss.backward()
                 loss_sum += loss.item()
-            if interrupted:
+            if stopped:
                 break
             torch.nn.utils.clip_grad_norm_(parameters, 1.0)
             optimizer.step()
-            seen += per_rig * world
+            for key in batch:
+                counts[key] = counts.get(key, 0) + 1
+            seen += len(batch)
             steps_done += 1
             pace = (time.time() - started) / (seen - first_seen) * step_examples
             # The loss is over this rig's examples of the step; the other rigs log theirs
             status = f"{progress()} loss {loss_sum:.3f}"
-            log(f"{status} lr {rate(seen - 1):.2e} {pace:.1f} s/step, "
-                f"{max(0, total - seen) / step_examples * pace / 3600:.1f} h left")
+            log(f"{status} lr {rate(seen - 1):.2e} {pace:.1f} s/step, {left() / step_examples * pace / 3600:.1f} h left")
             if writer:
                 write_line(args.status_file, f"{status}, {world}/{args.nodes} rigs")
-            if steps_done % args.save_steps == 0 or seen >= total:
+            if steps_done % args.save_steps == 0:
                 save()
     except torch.OutOfMemoryError:
         if writer:
@@ -456,19 +607,10 @@ def main():
         save()
         raise
 
-    if interrupted:
-        save()
-        log(f"Stopped at {progress()} because a rig is leaving or joining; saved")
-        # Not 0: to meet.py that would mean the run is finished
-        sys.exit(75)
-
-    if writer:
-        final = os.path.join(args.run_dir, "final")
-        model.save_pretrained(final)
-        tokenizer.save_pretrained(final)
-        write_line(os.path.join(args.run_dir, "done"), progress())
-        log(f"Finished. The adapter is in {final}")
-    dist.destroy_process_group()
+    save()
+    log(f"Stopped at {progress()} because a rig is leaving or joining; saved")
+    # Not 0: to meet.py that would mean the run is finished, and this one never is
+    sys.exit(75)
 
 
 if __name__ == "__main__":
