@@ -4,34 +4,90 @@ Can a local model on the LAN rig take over code writing? (owner, 2026-11-03). Si
 by Claude reading every answer, compiling it offline (`compile.sh`) and, for t1, running `tasks/t1/test`. Tasks and
 rubric: `README.md` in this folder.
 
-Cell format: compile result, then verdict. `✓` compiles first try, `✗n` n compile errors (a floor when the compiler
-stopped early). Verdicts: `pass` (correct), `minor` (correct, only minor defects), `fixable` (right after at most 2
-one-line repairs), `unusable`. A cell with two results is two runs of the same task (the client sends no seed, so
-runs differ). `—` not run.
+Each result set has a short name, used as its column in the per-task tables. Within a section, every set ran under
+the same conditions (the section heading).
 
-**Closest Claude (est.)** is the Claude model and version whose code on tasks like these the row's results are
-closest to: a judgement by the grader (Claude Opus 5.5, 2026-11-07) from the failure kinds (invented APIs, wrong
-checks, missed requirements, first-try compile rate), not a measurement. Claude Haiku 5.5 has its own measured row,
-which anchors the column; the other entries are still estimates.
+- **Setup:** the rig's card and the power limit it runs under (tokens/s depends on both), `kv_cache_type` (f16 is
+  Ollama's default) and `num_ctx`. VRAM is from `/api/ps` at that context.
+- **Per-task cells:** compile result, then verdict. `✓` compiles first try, `✗n` n compile errors (a floor when the
+  compiler stopped early). Verdicts: `pass` (correct), `minor` (correct, only minor defects), `fixable` (right after at
+  most 2 one-line repairs), `unusable`. Two results are two runs of the same task (the client sends no seed, so runs
+  differ). `—` not run.
+- **Closest Claude (est.)** is the Claude model and version whose code on tasks like these the set's results are
+  closest to: a judgement by the grader (Claude Opus 5.5, 2026-11-07) from the failure kinds (invented APIs, wrong
+  checks, missed requirements, first-try compile rate), not a measurement. Claude Haiku 5.5 has its own measured set,
+  which anchors the column; the other entries are still estimates.
 
-## Comparable rows (think on, rules v2, two runs per task)
+## Comparable sets (think on, rules v2, two runs per task)
 
-| Model | Quant | VRAM @64k | tok/s | Think | Rules | t1 | t2 | t3 | t4 | t5 | w1 | First-try compiles | Right after ≤2 one-line repairs | Answer tokens (sum) | Closest Claude (est.) | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| qwen3.8:27b | Q4_K_M | 17.6 GB | 111–130 | on | v2 | ✓ unusable / ✓ unusable (tests fail, both) | ✓ fixable / ✗4 fixable | ✓ minor / ✓ fixable | ✓ fixable / ✓ fixable | ✓ pass / ✓ minor | ✓ minor / ✗1 fixable | 10/12 | 10/12 (correct as written: 4/12) | 60,261 | Claude 3.5 Sonnet; below Haiku 5.5 (measured) | details below; ~2.5× qwen3.5's speed on the same 4090, w1 in ~1.6 min |
-| **claude-haiku-5-5** (baseline) | API | — | — | default | v2 | ✓ pass / ✓ pass | ✓ minor / ✓ minor | ✓ pass / ✓ minor | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ pass | 12/12 | 12/12 (correct as written: 12/12) | ~22,000 (est. from 75 KB of answers) | Haiku 5.5 (itself) | run as a Claude Code subagent, see **Haiku runs** below; 25–105 s per task |
+### Setup
 
-Not yet run: **qwen3.5:27b · think · v2**, the fair qwen3.5 row (needs the owner to load qwen3.5:27b on the rig).
+| Set | Model | Quant | GPU (power limit) | KV cache | Context | VRAM | tok/s |
+|---|---|---|---|---|---|---|---|
+| **Q4 · 4090** | qwen3.8:27b | Q4_K_M | RTX 4090 (400 W) | f16 | 64k | 17.6 GB | 111–130 |
+| **Q8 · 5090 · f16** | qwen3.8:27b | Q8_0 | RTX 5090 (520 W) | f16 | 50k | 31.1 GB | 49–53 |
+| **Q8 · 5090 · q8 KV** | qwen3.8:27b | Q8_0 | RTX 5090 (520 W) | q8_0 | 64k | 30.4 GB | 51–52 |
+| **Haiku 5.5** | claude-haiku-5-5 | API | — | — | — | — | — |
+
+### Scores (12 answers each)
+
+| Set | First-try compiles | Right after ≤2 one-line repairs | Correct as written | Answer tokens | Closest Claude (est.) |
+|---|---|---|---|---|---|
+| **Q4 · 4090** | 10/12 | 10/12 | 4/12 | 60,261 | Claude 3.5 Sonnet; below Haiku 5.5 |
+| **Q8 · 5090 · f16** | 7/12 | 10/12 | 5/12 | 58,450 | Claude 3.5 Sonnet; below Haiku 5.5 |
+| **Q8 · 5090 · q8 KV** | 8/12 | 12/12 | 6/12 | 60,700 | Claude 3.5 Sonnet; below Haiku 5.5 |
+| **Haiku 5.5** | 12/12 | 12/12 | 12/12 | ~22,000 (est.) | itself |
+
+### Per task (run 1 / run 2)
+
+| Task | Q4 · 4090 | Q8 · 5090 · f16 | Q8 · 5090 · q8 KV | Haiku 5.5 |
+|---|---|---|---|---|
+| t1 ring buffer | ✓ unusable / ✓ unusable | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ pass |
+| t2 console command | ✓ fixable / ✗4 fixable | ✓ pass / ✓ fixable | ✓ pass / ✓ pass | ✓ minor / ✓ minor |
+| t3 editor window | ✓ minor / ✓ fixable | ✗1 fixable / ✗4 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ minor |
+| t4 bug fix | ✓ fixable / ✓ fixable | ✓ unusable / ✗4 fixable | ✓ fixable / ✓ fixable | ✓ pass / ✓ pass |
+| t5 Find* removal | ✓ pass / ✓ minor | ✓ pass / ✓ minor | ✓ pass / ✓ pass | ✓ pass / ✓ pass |
+| w1 Apparel Editor | ✓ minor / ✗1 fixable | ✗3 unusable / ✗2 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ pass |
+
+### Notes
+
+- **Q4 · 4090:** t1 fails the tests both times. ~2.5× qwen3.5's speed on the same 4090; w1 in ~1.6 min.
+- **Q8 · 5090 · f16:** run at `num_ctx=50000` because f16 spills at 64k (94% on GPU already at 54k). ~2.3× slower than
+  Q4 · 4090, but t1 right both times; w1 in ~3–3.7 min.
+- **Q8 · 5090 · q8 KV:** the same model and rig with `kv_cache_type=q8_0`, which fits 64k fully on the GPU in less
+  VRAM than f16 needed at 50k, at the same speed. No sign the quantized cache hurt: right after small repairs on all
+  12 answers (f16 at 50k: 10), within the noise of two runs. w1 in ~3.6–4 min.
+- **Haiku 5.5:** run as a Claude Code subagent with its default thinking, see **Haiku runs** below; 25–105 s per
+  task. Its answer tokens are estimated from 75 KB of answers.
+
+Not yet run: **qwen3.5:27b · think · v2**, the fair qwen3.5 set (needs the owner to load qwen3.5:27b on the rig).
 
 ## History: not comparable (2026-11-03, mixed rules and think modes, one run each)
 
-| Model | Quant | VRAM @64k | tok/s | Think | Rules | t1 | t2 | t3 | t4 | t5 | w1 | First-try compiles | Right after ≤2 one-line repairs | Answer tokens (sum) | Closest Claude (est.) | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| qwen3.5:27b | Q4_K_M | 20.7 GB | 47–49 | off | v1 | ✓ unusable (tests fail) | ✓ minor | ✗1+ unusable | ✗3 fixable | ✗1 fixable | — | 2/5 (t1 compiles but is wrong) | 3/5 (t2, t4, t5) | 7,320 | Claude 3 Haiku | t4 uses bare `activeSelf` (wrong check, 1 critical); t5 deleted `using Fusion` (rules v1 wording) but found `LightService`; t3 invented 4 APIs |
-| qwen3.5:27b | Q4_K_M | 20.7 GB | 47–49 | on | v1 | ✓ pass | — | ✗2 fixable | — | — | — | 1/2 | 2/2 | 9,467 | Claude 3.5 Haiku | only t1 and t3 run; t1 ~2.5 min, all tests pass |
-| qwen3.5:27b | Q4_K_M | 20.7 GB | 47 | on | v2 | — | — | — | — | — | ✗6 unusable | 0/1 | 0/1 | 10,690 | Claude 3.5 Haiku | rows not clickable, no status tags, project-change hook never subscribed, dead list method; 118 of 234 lines kept (50%) |
+All three: qwen3.5:27b Q4_K_M on the RTX 4090 (400 W), f16 cache, 64k context, 20.7 GB VRAM, 47–49 tok/s.
 
-Folders: row 1 `results/qwen3.5-27b/t1..t5`, row 2 `t1k`, `t3k`, row 3 `w1`. The trial's own notes:
+| Set | Think | Rules | First-try compiles | Right after ≤2 one-line repairs | Answer tokens | Closest Claude (est.) |
+|---|---|---|---|---|---|---|
+| **3.5 · off · v1** | off | v1 | 2/5 (t1 compiles but is wrong) | 3/5 (t2, t4, t5) | 7,320 | Claude 3 Haiku |
+| **3.5 · on · v1** | on | v1 | 1/2 | 2/2 | 9,467 | Claude 3.5 Haiku |
+| **3.5 · on · v2** | on | v2 | 0/1 | 0/1 | 10,690 | Claude 3.5 Haiku |
+
+| Task | 3.5 · off · v1 | 3.5 · on · v1 | 3.5 · on · v2 |
+|---|---|---|---|
+| t1 ring buffer | ✓ unusable (tests fail) | ✓ pass | — |
+| t2 console command | ✓ minor | — | — |
+| t3 editor window | ✗1+ unusable | ✗2 fixable | — |
+| t4 bug fix | ✗3 fixable | — | — |
+| t5 Find* removal | ✗1 fixable | — | — |
+| w1 Apparel Editor | — | — | ✗6 unusable |
+
+- **3.5 · off · v1:** t4 uses bare `activeSelf` (wrong check, 1 critical); t5 deleted `using Fusion` (rules v1
+  wording) but found `LightService`; t3 invented 4 APIs.
+- **3.5 · on · v1:** only t1 and t3 run; t1 ~2.5 min, all tests pass.
+- **3.5 · on · v2:** rows not clickable, no status tags, project-change hook never subscribed, dead list method; 118
+  of 234 lines kept (50%).
+
+Folders: `results/qwen3.5-27b/t1..t5` (off · v1), `t1k`, `t3k` (on · v1), `w1` (on · v2). The trial's own notes:
 `results/qwen3.5-27b/SCORECARD.md` (its "5 of 5 with think" is wrong: only t1 and t3 ran with think on).
 
 ## Grading notes, 2026-11-07 (grader: Claude Opus 5.5)
@@ -67,6 +123,44 @@ generating (no answer was lost or picked).
   event, decorative separator comments. About all of it usable as written.
 - **w1 run 2:** ✗1 (`Array.Contains` needs `using System.Linq`), otherwise complete; minor: an unused local.
 
+### qwen3.8:27b-q8_0 on the 5090 (f16 cache, 50k context), 2026-11-08
+
+Folders: `results/qwen3.8-27b-q8_0/<task>-think-r50k-1` and `-r50k-2`. Run 1 of t3 was redone after the rig's status
+probe timed out twice. Graded from `check.sh` and the task checks on each answer; not every answer was read line by line.
+
+- **t1, both runs:** pass every test (the Q4_K_M build failed both).
+- **t2 run 1:** `JoinArgs(args, 0, end)` with the trailing `-count` peeled first: right. **Run 2, critical:**
+  `JoinArgs(args, 1, ...)`, the same bug the Q4_K_M build made (drops the first search word). Two one-line repairs.
+- **t3 run 1:** ✗1, `AssetDatabase.TryGetGUIDAndLocalFileIdentifier` called with a path (that overload takes an
+  object; `AssetPathToGUID` is the one-line repair). **Run 2:** ✗4, one cause: a ternary inside an interpolated
+  string. Both show the bar every 200 files and clear it in `finally`.
+- **t4 run 1, critical:** guards the 3 calls with `enabled`, which stays true while the object is inactive: the bug
+  is not fixed. **Run 2:** the right check (`gameObject.activeInHierarchy`) in one helper, but the helper takes a
+  `Coroutine` instead of an `IEnumerator` (✗4, one cause, one-line repair).
+- **t5, both runs:** passed the trap (`LightService.Instance`, no new registry, no deleted `using`). Run 2 used
+  `LightService.SetColorFilter` and dropped the per-light try/catch (minor, as with Q4_K_M).
+- **w1 run 1:** ✗3: `?.` on the `Apparel` struct at 2 places and `EditorGUILayout.Label` (3 repairs, over the
+  rubric's 2). **Run 2:** ✗2, missing `using System` and `EditorGUI.Label`. Both have the status filter, clickable
+  rows and the `OnProjectChange` reload. Run 2 put `#if UNITY_EDITOR` above the `// FILE:` line, so `extract.py`
+  saved it as `code0.cs` (copied to `ApparelEditorWindow.cs` for `check.sh`).
+
+### qwen3.8:27b-q8_0 on the 5090 (q8_0 cache, 64k context), 2026-11-08
+
+Folders: `results/qwen3.8-27b-q8_0/<task>-think-r64kq8-1` and `-r64kq8-2`. Graded like the f16 set: `check.sh` and
+the task checks on each answer, not every answer read line by line.
+
+- **t1, both runs:** pass every test.
+- **t2, both runs:** `JoinArgs(args, 0, nameCount)` with the trailing `-count` peeled first: right.
+- **t3 run 1:** ✗1, invented `EditorGUI.IndentedScope` (the real one is `IndentLevelScope`). **Run 2:** ✗1, `MinSize`
+  for `minSize`. Both show a cancelable bar every 200 files and clear it in `finally`.
+- **t4, both runs, major:** the right 3 call sites guarded with `isActiveAndEnabled`, not `activeInHierarchy`, like
+  the Q4_K_M build: a disabled handler on an active object would now skip coroutines it used to run. A one-word
+  swap at each site.
+- **t5, both runs:** passed the trap (`LightService.Instance`, no new registry, no deleted `using`), per-light
+  try/catch kept.
+- **w1, both runs:** ✗1, `!= null` on the `Apparel` struct (a one-line repair). Both have the status filter,
+  clickable rows and the `OnProjectChange` reload; run 1 adds ping, select and arrow-key navigation.
+
 ### claude-haiku-5-5
 
 - **t1:** both pass every test.
@@ -99,6 +193,11 @@ after small repairs 10 times in 12.
 **It is still below Claude Haiku 5.5**, which was correct as written on all 12 runs. qwen3.8's misses are the kind
 that pass review only when someone reads closely: an off-by-start ring buffer, an idiom copied from an example
 without its context (t2), a near-miss Unity API (t4). Only 4 of its 12 answers were usable as written. For code
-that goes into the game, a qwen3.8 answer still needs a careful reviewer. The fair qwen3.5 row (think on, v2) is
+that goes into the game, a qwen3.8 answer still needs a careful reviewer. The fair qwen3.5 set (think on, v2) is
 still to run; it would settle how much of the gain is the model and how much is think mode plus rules v2.
+
+**Q8_0 on the 5090 (2026-11-08)** got t1 right in all 4 runs where Q4_K_M failed both, and is right after small
+repairs on 22 of 24 answers, but at under half the 4090's speed and with the same kinds of near-miss API mistakes.
+A `q8_0` KV cache cost nothing measurable: it holds 64k on the GPU and its set scored as well as f16 at 50k. Use
+`kv_cache_type=q8_0` on the 5090.
 

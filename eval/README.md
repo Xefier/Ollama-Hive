@@ -26,7 +26,7 @@ client, and needs nothing from the game but its compiled assemblies (`UNITY_PROJ
 | `check.sh <results/<model>> [folder...]` | The mechanical half of grading, for every answer folder or the ones named: extract, t1 test, compile (t4/t5 with the class renamed), t4/t5 diff against the input, the footer. |
 | `extract.py <dir>` | Code out of `answer.md`: fenced blocks, or bare code split at `// FILE:` lines. |
 | `compile.sh <Assembly-CSharp\|Assembly-CSharp-Editor> <file.cs>...` | Offline compile with the game's own compiler arguments, in about a second. |
-| `rules.txt` | The system prompt: the game's rules boiled down. **v2**, used for every comparable row. `rules.v1.txt` is the first version (its wording made a model delete a needed `using Fusion`). |
+| `rules.txt` | The system prompt: the game's rules boiled down. **v2**, used for every comparable set. `rules.v1.txt` is the first version (its wording made a model delete a needed `using Fusion`). |
 | `tasks/<task>/` | `prompt.txt`, `files.txt` (inputs, relative to this folder) and the frozen inputs in `inputs/`. `tasks/t1/test` is the dotnet test for t1. |
 | `results/<model>/` | Every answer, kept. `results/qwen3.5-27b/SCORECARD.md` is the first trial's own notes (partly wrong: see RESULTS.md). |
 
@@ -87,11 +87,11 @@ Task: <task>
 4. Reply with only "done".
 ```
 
-Then `check.sh` on its folder as above. Differences from the rig runs, to state in the row: the subagent's context
+Then `check.sh` on its folder as above. Differences from the rig runs, to state in its Notes bullet: the subagent's context
 also holds Claude Code's own system prompt, it reads the inputs through tool calls, and its token counts are not
 reported (estimate them from the answer sizes, about 3.4 characters per token).
 
-## Rubric (the same for every row)
+## Rubric (the same for every set)
 
 For each answer:
 
@@ -103,14 +103,18 @@ For each answer:
 4. **Task checks:** t1 tests pass; t4 guards with `activeInHierarchy` (not `activeSelf`, not `isActiveAndEnabled`);
    t5 reuses `LightService` and deletes no `using`; w1 has clickable rows, status tags in the list, the project-change
    reload, and how much is usable as written.
-5. **From the footer:** prompt and answer tokens, tokens/s. **From `/api/ps`:** VRAM at 64k context.
+5. **From the footer:** prompt and answer tokens, tokens/s. **From `/api/ps`:** VRAM at 64k context. **From the owner:** the GPU and its power
+   limit, and the flight sheet's `kv_cache_type`.
 
-Single runs are noisy (the client sends no seed or temperature), so every new row has two runs per task, both
+Single runs are noisy (the client sends no seed or temperature), so every new set has two runs per task, both
 recorded when they differ.
 
-## Adding a row to RESULTS.md
+## Adding a result set to RESULTS.md
 
-One row per model × quant × think × rules version, in the **Comparable rows** table. Each task cell: the compile
-result, then the verdict, both runs (`✓ pass / ✗1 fixable`). Verdicts: `pass`, `minor` (right, minor defects only),
-`fixable` (right after ≤2 one-line repairs), `unusable`. Add the grading notes per task under **Grading notes**, and
-update **Closest Claude (est.)** and the **Verdict** when the new row changes them. Commit `results/<model>/` with it.
+One set per model × quant × rig setup (GPU, power limit, `kv_cache_type`, `num_ctx`) × think × rules version, in
+**Comparable sets**. Give it a short name (e.g. `Q8 · 5090 · q8 KV`) and add it in three places: a row in **Setup**,
+a row in **Scores**, and a column in **Per task**, where each cell is the compile result, then the verdict, both runs
+(`✓ pass / ✗1 fixable`). Verdicts: `pass`, `minor` (right, minor defects only), `fixable` (right after ≤2 one-line
+repairs), `unusable`. Keep long remarks out of the tables: one bullet under **Notes**, and the per-task grading
+under **Grading notes**. Update **Closest Claude (est.)** and the **Verdict** when the new set changes them. Commit
+`results/<model>/` with it.
