@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.6.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.7.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -237,6 +237,29 @@ about it.
   skipped and counted in the log, so a file read while its last line is half written does no harm.
 - **Newer** means the file's modification time, as the web server or the rig's disk reports it.
 
+**Having a Claude session keep it.** Serve a folder that holds nothing but the dataset, since the server shows the
+whole folder to the LAN, from the PC the session works on: `python -m http.server 8000 --bind <this PC's LAN address>`.
+Run that outside the session (its own terminal, or a scheduled task at logon): a server the session starts ends with
+the session. Then give the session a standing instruction like this one:
+
+```
+Keep a training dataset at D:\train-data\train.jsonl and serve that folder with
+"python -m http.server 8000 --bind <LAN address>" if nothing is serving it yet.
+
+After each task you finish, append one line to the file: a JSON object
+{"messages": [{"role": "system", "content": ...}, {"role": "user", "content": ...},
+{"role": "assistant", "content": ...}]} where the user message is the task with the
+code it needed, and the assistant message is the fix as it was finally accepted.
+One example per line, UTF-8, no line breaks inside a line. Only append; never
+rewrite earlier lines. Keep each example under about 2000 tokens, and leave out
+tasks that failed or were reverted.
+```
+
+Three things in it matter to the training: the model learns only the last assistant message, so the fix has to be
+there; examples over `max_len` are left out, hence the size limit; and a rewritten line is a new example that gets
+trained again, hence append only. Make the user message look like the prompts the local model will get later: that
+is what it learns to answer.
+
 What can be used at any time is the `adapter` folder: `mode=export` makes an Ollama model of the run as it stands
 (see [Serving a trained model](#serving-a-trained-model)).
 
@@ -246,6 +269,18 @@ flight sheet keeps them for the next run.
 
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
+
+**Progress page.** Every rig on the training flight sheet serves one at `http://<rig>:29410/` (`train_port` + 10;
+the miner log has the link). Open it from any rig, on any device on the LAN: it asks all `peers` and draws them
+together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
+the size of the dataset, and when each rig was training, waiting or away. A rented rig doesn't answer and its part
+of the history is missing until it is back; with every rig rented there is no page. Each rig keeps its history in
+`<data_dir>/train/runs/<run_name>/history.jsonl`, one line per step. The page is read-only, and like the training
+ports it is as open as the rig leaves it: anything on the LAN can read the run's progress.
+
+The loss only says how well the model predicts the examples it is being trained on. It can't tell whether an answer
+would compile or fix the task: for that the exported model has to write the answer and something has to check it
+(see `eval/`).
 
 **Network.** A rank 16 adapter on a 27B model is about 110 M weights, and each rig sends them once per step (~450 MB).
 On 1 Gbit/s that is several seconds a step, so a higher `grad_accum` means less time on the wire per example; 2.5 or
@@ -348,6 +383,7 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 - `h-train.sh`: `mode=train`: installs the training environment and runs `meet.py`
 - `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
 - `train.py`: one worker of the QLoRA run
+- `status.py`, `status.html`: the progress page of a run, and the rig's part of its data
 - `requirements-train.txt`: the Python packages of the training environment
 - `h-export.sh`: `mode=export`: makes an Ollama model of a run
 - `export.py`: merges the adapter into the base model's weights

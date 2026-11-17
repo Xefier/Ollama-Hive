@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training progress</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series: #2a78d6; --idle: #c3c2b7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series: #3987e5; --idle: #52514e;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 14px; margin: 0; font-weight: 600; }
+.sub { color: var(--ink-2); margin: 2px 0 0; }
+.note { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-top: 12px; }
+.rigs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.rig { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; flex: 1 1 260px; min-width: 0; }
+.rig b { font-weight: 600; }
+.rig span { color: var(--ink-2); overflow-wrap: anywhere; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--idle); }
+.dot.on { background: var(--series); }
+.dot.off { background: none; border: 1px solid var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.tile .label { color: var(--ink-2); font-size: 12px; }
+.tile .value { font-size: 24px; font-weight: 600; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.15); display: none; }
+.tip b { font-weight: 600; }
+.legend { display: flex; gap: 16px; color: var(--ink-2); font-size: 12px; margin: 4px 0 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--ink-2); }
+table { border-collapse: collapse; width: 100%; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); }
+th { color: var(--ink-2); font-weight: 500; }
+th:first-child, td:first-child { text-align: left; }
+.empty { color: var(--ink-2); padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Training progress</h1>
+  <p class="sub" id="sub">Asking the rigs…</p>
+  <div class="rigs" id="rigs"></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="card"><h2>Training loss</h2><p class="note" id="loss-note"></p><div class="chart" id="loss"></div></div>
+  <div class="card"><h2>Steps left to train</h2>
+    <p class="note">Rises when examples are added to the dataset, falls as the rigs train them.</p><div class="chart" id="left"></div></div>
+  <div class="card"><h2>Examples in the dataset</h2>
+    <p class="note">The ones that fit max_len, as the rigs see them.</p><div class="chart" id="size"></div></div>
+  <div class="card"><h2>What each rig was doing</h2>
+    <div class="legend"><span><i style="background:var(--series)"></i>Training</span>
+      <span><i style="background:var(--idle)"></i>Waiting for examples</span><span>Blank: away (rented, off, or on another flight sheet)</span></div>
+    <div class="chart" id="timeline"></div></div>
+  <details><summary>Latest steps as a table</summary><div id="table"></div></details>
+</main>
+<script>
+"use strict";
+// The rigs to ask: ?rigs=a,b for a copy of this page opened from a file, otherwise the peers of the rig that served it
+const query = new URLSearchParams(location.search);
+const port = query.get("port") || location.port || "29410";
+const rigs = new Map();   // address -> {next, lines, status}
+const POLL = 15000;
+const AWAY_AFTER = 30 * 60;   // a training rig silent this long has gone without saying so
+
+function $(id) { return document.getElementById(id); }
+function number(value) { return Math.round(value).toLocaleString("en-US"); }
+
+async function getJSON(url) {
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 5000);
+  try {
+    const response = await fetch(url, { signal: control.signal, cache: "no-store" });
+    return response.ok ? await response.json() : null;
+  } catch (error) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function addRigs(addresses) {
+  for (const address of addresses) {
+    if (address && !rigs.has(address)) rigs.set(address, { next: 0, lines: [], status: null });
+  }
+}
+
+async function askRig(address, rig) {
+  const base = `http://${address}:${port}`;
+  const [status, history] = await Promise.all([getJSON(`${base}/status`), getJSON(`${base}/history?from=${rig.next}`)]);
+  rig.status = status;
+  if (status) addRigs(status.peers);
+  if (!history) return;
+  if (history.reset) rig.lines = [];
+  rig.next = history.next;
+  for (const text of history.lines.split("\n")) {
+    if (!text) continue;
+    try { rig.lines.push(JSON.parse(text)); } catch (error) { /* a damaged line is not worth stopping for */ }
+  }
+}
+
+async function poll() {
+  if (!rigs.size) {
+    if (query.get("rigs")) addRigs(query.get("rigs").split(","));
+    else {
+      const own = await getJSON("status");
+      if (own) addRigs(own.peers);
+    }
+  }
+  await Promise.all([...rigs].map(([address, rig]) => askRig(address, rig)));
+  render();
+}
+
+// ---- what the lines say
+
+// One entry per step, from whichever rigs took part in it: their losses averaged
+function stepsOfRun() {
+  const steps = new Map();
+  for (const rig of rigs.values()) {
+    for (const line of rig.lines) {
+      if (line.e !== "step") continue;
+      const step = steps.get(line.step) || { step: line.step, t: line.t, loss: 0, count: 0 };
+      step.loss += line.loss;
+      step.count += 1;
+      if (line.t >= step.t) Object.assign(step, { t: line.t, left: line.left, n: line.n, rigs: line.rigs, size: line.size });
+      steps.set(line.step, step);
+    }
+  }
+  return [...steps.values()].sort((a, b) => a.step - b.step).map(step => ({ ...step, loss: step.loss / step.count }));
+}
+
+// Every line of every rig in time order, for what changes while nothing trains too (the dataset growing)
+function linesByTime() {
+  return [...rigs.values()].flatMap(rig => rig.lines).sort((a, b) => a.t - b.t);
+}
+
+function averaged(steps, width) {
+  let sum = 0;
+  return steps.map((step, index) => {
+    sum += step.loss;
+    if (index >= width) sum -= steps[index - width].loss;
+    return { x: step.step, y: sum / Math.min(index + 1, width), t: step.t };
+  });
+}
+
+function thinned(points, most) {
+  if (points.length <= most) return points;
+  const every = Math.ceil(points.length / most);
+  return points.filter((point, index) => index % every === 0 || index === points.length - 1);
+}
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+}
+
+// Stretches of training and waiting of one rig. Between them it was away.
+function stretches(rig, now) {
+  const lines = [...rig.lines].sort((a, b) => a.t - b.t);
+  const live = rig.status && ["training", "idle"].includes(rig.status.state);
+  const result = [];
+  lines.forEach((line, index) => {
+    if (line.e === "stop") return;
+    const kind = line.e === "idle" ? "idle" : "training";
+    const following = lines[index + 1];
+    let end = following ? following.t : (live ? now : line.t);
+    // Waiting is silent by nature; a training rig writes a line per step
+    if (kind === "training" && end - line.t > AWAY_AFTER) end = line.t;
+    if (end <= line.t) return;
+    const last = result[result.length - 1];
+    if (last && last.kind === kind && last.end === line.t) last.end = end;
+    else result.push({ kind, start: line.t, end });
+  });
+  return result;
+}
+
+// ---- drawing
+
+const NS = "http://www.w3.org/2000/svg";
+function svg(name, attributes, parent) {
+  const node = document.createElementNS(NS, name);
+  for (const key in attributes) node.setAttribute(key, attributes[key]);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function niceTicks(low, high, count) {
+  if (high <= low) high = low + 1;
+  const rough = (high - low) / count;
+  const power = Math.pow(10, Math.floor(Math.log10(rough)));
+  const step = [1, 2, 5, 10].map(m => m * power).find(s => s >= rough);
+  const ticks = [];
+  for (let value = Math.floor(low / step) * step; value <= high + step * 1e-9; value += step) ticks.push(+value.toFixed(10));
+  if (ticks[ticks.length - 1] < high) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+function timeLabel(seconds, span) {
+  const date = new Date(seconds * 1000);
+  const day = date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const clock = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return span > 3 * 86400 ? day : span > 86400 ? `${day} ${clock}` : clock;
+}
+
+function fullTime(seconds) {
+  return new Date(seconds * 1000).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function emptyChart(host, text) {
+  host.innerHTML = `<div class="empty">${text}</div>`;
+}
+
+// The frame every chart shares: the plot area, an x scale with its ticks, and a tooltip
+function frame(host, height, xLow, xHigh, xText, left) {
+  host.innerHTML = "";
+  const width = Math.max(320, host.clientWidth);
+  const box = { left, right: width - 16, top: 10, bottom: height - 24 };
+  const root = svg("svg", { viewBox: `0 0 ${width} ${height}`, height }, host);
+  if (xHigh <= xLow) xHigh = xLow + 1;
+  const x = value => box.left + (value - xLow) / (xHigh - xLow) * (box.right - box.left);
+  const ticks = Math.max(2, Math.min(6, Math.floor((box.right - box.left) / 120)));
+  for (let index = 0; index <= ticks; index++) {
+    const value = xLow + (xHigh - xLow) * index / ticks;
+    const label = svg("text", { x: x(value), y: height - 6, "text-anchor": index === 0 ? "start" : index === ticks ? "end" : "middle" }, root);
+    label.textContent = xText(value);
+  }
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  host.appendChild(tip);
+  const showTip = (html, px, py) => {
+    tip.innerHTML = html;
+    tip.style.display = "block";
+    const scale = host.clientWidth / width;
+    const leftEdge = Math.min(px * scale + 12, host.clientWidth - tip.offsetWidth - 4);
+    tip.style.left = `${Math.max(0, leftEdge)}px`;
+    tip.style.top = `${Math.max(0, py - tip.offsetHeight - 8)}px`;
+  };
+  return { root, box, x, width, showTip, hideTip: () => { tip.style.display = "none"; } };
+}
+
+// One series over steps or time. points: [{x, y}], in x order. fromZero: a quantity, drawn as an area from 0.
+function lineChart(host, points, options) {
+  if (points.length < 2) return emptyChart(host, options.empty);
+  const xLow = points[0].x, xHigh = points[points.length - 1].x;
+  const values = points.map(point => point.y);
+  const yTicks = niceTicks(options.fromZero ? 0 : Math.min(...values), Math.max(...values), 4);
+  const yLow = yTicks[0], yHigh = yTicks[yTicks.length - 1];
+  const { root, box, x, showTip, hideTip } = frame(host, 220, xLow, xHigh, options.xText(xHigh - xLow), 52);
+  const y = value => box.bottom - (value - yLow) / (yHigh - yLow) * (box.bottom - box.top);
+  for (const tick of yTicks) {
+    svg("line", { x1: box.left, x2: box.right, y1: y(tick), y2: y(tick), stroke: tick === yLow ? "var(--axis)" : "var(--grid)" }, root);
+    svg("text", { x: box.left - 8, y: y(tick) + 4, "text-anchor": "end" }, root).textContent = options.yText(tick);
+  }
+  const path = points.map((point, index) => `${index ? "L" : "M"}${x(point.x).toFixed(1)},${y(point.y).toFixed(1)}`).join("");
+  if (options.fromZero) {
+    svg("path", { d: `${path}L${x(xHigh)},${y(yLow)}L${x(xLow)},${y(yLow)}Z`, fill: "var(--series)", opacity: 0.1 }, root);
+  }
+  svg("path", { d: path, fill: "none", stroke: "var(--series)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, root);
+  const last = points[points.length - 1];
+  svg("circle", { cx: x(last.x), cy: y(last.y), r: 4, fill: "var(--series)", stroke: "var(--surface)", "stroke-width": 2 }, root);
+
+  const cross = svg("line", { y1: box.top, y2: box.bottom, stroke: "var(--axis)", visibility: "hidden" }, root);
+  const dot = svg("circle", { r: 4, fill: "var(--series)", stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }, root);
+  const area = svg("rect", { x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top, fill: "transparent" }, root);
+  area.addEventListener("pointermove", event => {
+    const bounds = root.getBoundingClientRect();
+    const at = xLow + ((event.clientX - bounds.left) / bounds.width * root.viewBox.baseVal.width - box.left)
+      / (box.right - box.left) * (xHigh - xLow);
+    let low = 0, high = points.length - 1;
+    while (high - low > 1) {
+      const middle = (low + high) >> 1;
+      if (points[middle].x < at) low = middle; else high = middle;
+    }
+    const point = at - points[low].x < points[high].x - at ? points[low] : points[high];
+    cross.setAttribute("x1", x(point.x));
+    cross.setAttribute("x2", x(point.x));
+    dot.setAttribute("cx", x(point.x));
+    dot.setAttribute("cy", y(point.y));
+    cross.setAttribute("visibility", "visible");
+    dot.setAttribute("visibility", "visible");
+    showTip(options.tip(point), x(point.x), y(point.y));
+  });
+  area.addEventListener("pointerleave", () => {
+    cross.setAttribute("visibility", "hidden");
+    dot.setAttribute("visibility", "hidden");
+    hideTip();
+  });
+}
+
+function timeline(host, now) {
+  const rows = [...rigs].map(([address, rig]) => ({ address, parts: stretches(rig, now) }));
+  const starts = rows.flatMap(row => row.parts.map(part => part.start));
+  if (!starts.length) return emptyChart(host, "No rig has trained yet.");
+  const from = Math.min(...starts);
+  const names = { training: "Training", idle: "Waiting for examples" };
+  const height = rows.length * 26 + 34;
+  const { root, box, x, showTip, hideTip } = frame(host, height, from, now, value => timeLabel(value, now - from), 110);
+  rows.forEach((row, index) => {
+    const top = box.top + index * 26;
+    svg("text", { x: 0, y: top + 14 }, root).textContent = row.address;
+    svg("line", { x1: box.left, x2: box.right, y1: top + 21, y2: top + 21, stroke: "var(--grid)" }, root);
+    for (const part of row.parts) {
+      const bar = svg("rect", { x: x(part.start), y: top + 4, width: Math.max(1, x(part.end) - x(part.start)), height: 12, rx: 2,
+                                fill: part.kind === "idle" ? "var(--idle)" : "var(--series)" }, root);
+      bar.addEventListener("pointermove", () => showTip(
+        `<b>${names[part.kind]}</b> ${fullTime(part.start)} to ${fullTime(part.end)}`, (x(part.start) + x(part.end)) / 2, top + 4));
+      bar.addEventListener("pointerleave", hideTip);
+    }
+  });
+}
+
+function render() {
+  const now = Date.now() / 1000;
+  drawnAt = $("loss").clientWidth;
+  const steps = stepsOfRun();
+  const lines = linesByTime();
+  const answering = [...rigs.values()].filter(rig => rig.status);
+  const run = answering.length ? answering[0].status.run : "";
+  $("sub").textContent = rigs.size ? `Run ${run || "?"} · ${answering.length} of ${rigs.size} rigs on the training flight sheet · updated ${new Date().toLocaleTimeString("en-GB")}`
+    : "No rig answers. Open this page from a rig that is on the training flight sheet.";
+
+  $("rigs").innerHTML = [...rigs].map(([address, rig]) => {
+    const state = rig.status ? rig.status.state : "";
+    const text = !rig.status ? "Not answering: rented, off, or on another flight sheet"
+      : `${state || "starting"}${rig.status.status ? " · " + rig.status.status : ""}`;
+    return `<div class="rig"><i class="dot ${state === "training" ? "on" : rig.status ? "" : "off"}"></i><b>${address}</b><br><span>${text}</span></div>`;
+  }).join("");
+
+  const latest = lines[lines.length - 1];
+  const lastStep = steps[steps.length - 1];
+  const width = Math.max(1, Math.min(200, Math.round(steps.length / 30)));
+  const smooth = averaged(steps, width);
+  const size = lastStep ? lastStep.size : 0;
+  const stepsLeft = latest && size ? Math.ceil(latest.left / size) : 0;
+  const recent = steps.slice(-51);
+  const pace = median(recent.slice(1).map((step, index) => step.t - recent[index].t).filter(gap => gap > 0 && gap < 600));
+  const hours = stepsLeft * pace / 3600;
+  const tiles = [
+    ["Step", latest ? number(latest.step) : "–"],
+    [`Loss, last ${width} step${width > 1 ? "s" : ""}`, smooth.length ? smooth[smooth.length - 1].y.toFixed(3) : "–"],
+    ["Examples in the dataset", latest ? number(latest.n) : "–"],
+    ["Steps left to train", latest ? number(stepsLeft) : "–"],
+    ["Time left at this pace", !stepsLeft ? "–" : !pace ? "?" : hours >= 48 ? `${(hours / 24).toFixed(1)} days` : `${hours.toFixed(1)} h`],
+    ["Rigs training now", `${answering.filter(rig => rig.status.state === "training").length} of ${rigs.size}`],
+  ];
+  $("tiles").innerHTML = tiles.map(([label, value]) => `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`).join("");
+
+  $("loss-note").textContent = width > 1 ? `Each point is the average of the last ${width} steps. Lower is better; it only measures the examples being trained.`
+    : "Lower is better; it only measures the examples being trained.";
+  lineChart($("loss"), thinned(smooth, 600), {
+    empty: "No steps yet.", xText: () => value => `step ${number(value)}`, yText: value => value.toFixed(2),
+    tip: point => `<b>${point.y.toFixed(3)}</b> at step ${number(point.x)} · ${fullTime(point.t)}`,
+  });
+  const overTime = { xText: span => value => timeLabel(value, span), yText: number, fromZero: true };
+  lineChart($("left"), thinned(lines.filter(line => line.size).map(line => ({ x: line.t, y: Math.ceil(line.left / line.size) })), 600), {
+    ...overTime, empty: "Nothing trained yet.", tip: point => `<b>${number(point.y)}</b> steps left · ${fullTime(point.x)}`,
+  });
+  lineChart($("size"), thinned(lines.map(line => ({ x: line.t, y: line.n })), 600), {
+    ...overTime, empty: "The rigs have no dataset yet.", tip: point => `<b>${number(point.y)}</b> examples · ${fullTime(point.x)}`,
+  });
+  timeline($("timeline"), now);
+
+  $("table").innerHTML = steps.length ? `<table><tr><th>Time</th><th>Step</th><th>Loss</th><th>Rigs</th><th>Examples</th></tr>${
+    steps.slice(-25).reverse().map(step => `<tr><td>${fullTime(step.t)}</td><td>${number(step.step)}</td><td>${step.loss.toFixed(3)}</td><td>${step.rigs}</td><td>${number(step.n)}</td></tr>`).join("")
+  }</table>` : `<p class="empty">No steps yet.</p>`;
+}
+
+poll();
+setInterval(poll, POLL);
+// The charts are drawn to the width they have, so they are drawn again when that changes
+let resizing, drawnAt = 0;
+new ResizeObserver(() => {
+  clearTimeout(resizing);
+  resizing = setTimeout(() => {
+    if ($("loss").clientWidth !== drawnAt) render();
+  }, 150);
+}).observe($("loss"));
+</script>
+</body>
+</html>

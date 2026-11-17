@@ -58,6 +58,8 @@ OH_LLAMA_CPP=b12477
 # The port the firewall rules guard: Ollama's, or in train mode the one the rigs meet on
 OH_GUARD_PORT=$OH_PORT
 [[ $OH_MODE == train ]] && OH_GUARD_PORT=$OH_TRAIN_PORT
+# The progress page of a training run (status.py), clear of the ports the workers meet on
+OH_STATUS_PORT=$((OH_TRAIN_PORT + 10))
 OH_TRAIN_DIR="$OH_DATA_DIR/train"
 OH_VENV="$OH_TRAIN_DIR/venv"
 OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"

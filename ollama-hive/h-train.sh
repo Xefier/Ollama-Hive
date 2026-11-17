@@ -119,10 +119,24 @@ train_once() {
     wait "$SERVER_PID"
 }
 
+# The progress page and this rig's part of its data, for as long as the flight sheet runs. h-stop.sh ends it with
+# everything else that runs from the training environment.
+start_status_page() {
+    local address
+    address=$(oh_lan_address)
+    [[ -n $address ]] || return
+    mkdir -p "$OH_RUN_PATH"
+    "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --peers "$OH_PEERS" \
+        --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" \
+        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" >> "$LOG_FILE" 2>&1 &
+    log "Progress page: http://$address:$OH_STATUS_PORT/"
+}
+
 # meet.py handles rigs joining and leaving by itself and the run has no end, so it only ends on an error. Every start
 # continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
 train_loop() {
     local told=""
+    start_status_page
     while true; do
         oh_set_state starting
         train_once

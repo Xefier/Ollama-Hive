@@ -16,6 +16,8 @@ Rigs come and go (a rental takes one, it comes back when idle), so nothing here 
   the furthest one (sync_checkpoint).
 - A rig told to stop says so to the others before the next example, and all of them save first (the stop flag).
 
+Every rig keeps a line per step in the run's history.jsonl, which status.py serves to the progress page.
+
 Dataset: JSON lines, each {"messages": [{"role": ..., "content": ...}, ...]} or {"text": "..."}. An example is known
 by its line: a changed line is a new example.
 """
@@ -502,6 +504,17 @@ def main():
     def progress():
         return f"step {seen // step_examples}, {math.ceil(left() / step_examples)} to go"
 
+    def note(event, loss=None):
+        """A line of this rig's history: what it did when, for the progress page."""
+        if not writer:
+            return
+        line = {"t": round(time.time()), "e": event, "step": seen // step_examples, "left": left(),
+                "n": len(examples), "rigs": world, "size": step_examples}
+        if loss is not None:
+            line["loss"] = round(loss, 4)
+        with open(os.path.join(args.run_dir, "history.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(line) + "\n")
+
     def waiting_for():
         return "new examples" if examples else "the dataset"
 
@@ -520,6 +533,7 @@ def main():
     log(f"{world} of {args.nodes} rigs, steps of {step_examples} examples ({per_rig} per rig now); "
         f"starting at {progress()}")
     save()
+    note("start")
     model.train()
     in_loop.append(1)
     idle = None
@@ -539,6 +553,7 @@ def main():
                     idle = True
                     save()
                     log(f"Nothing to train at {progress()}: waiting for {waiting_for()}")
+                    note("idle")
                     if writer:
                         write_line(args.state_file, "idle")
                 if writer:
@@ -592,6 +607,7 @@ def main():
             pace = (time.time() - started) / (seen - first_seen) * step_examples
             # The loss is over this rig's examples of the step; the other rigs log theirs
             status = f"{progress()} loss {loss_sum:.3f}"
+            note("step", loss_sum)
             log(f"{status} lr {rate(seen - 1):.2e} {pace:.1f} s/step, {left() / step_examples * pace / 3600:.1f} h left")
             if writer:
                 write_line(args.status_file, f"{status}, {world}/{args.nodes} rigs")
@@ -608,6 +624,7 @@ def main():
         raise
 
     save()
+    note("stop")
     log(f"Stopped at {progress()} because a rig is leaving or joining; saved")
     # Not 0: to meet.py that would mean the run is finished, and this one never is
     sys.exit(75)
