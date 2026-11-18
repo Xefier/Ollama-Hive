@@ -149,7 +149,8 @@ def merge(args):
         if args.status_file:
             # For the progress page: the download of a file is most of its time
             with open(args.status_file, "w", encoding="utf-8") as handle:
-                handle.write(f"step 1 of 4: adding the adapter to the base model's weights, file {number} of {len(files)}\n")
+                handle.write(f"{args.status_until * (number - 1) // len(files)}% · step 1 of 4: adding the adapter to the "
+                             f"base model's weights, file {number} of {len(files)}\n")
         target = os.path.join(args.out, name)
         # A finished file was moved into place whole, so one that exists is done
         if os.path.exists(target):
@@ -246,6 +247,7 @@ def main():
     command.add_argument("--base", required=True)
     command.add_argument("--out", required=True)
     command.add_argument("--status-file", help="where to say how far it is, for the progress page")
+    command.add_argument("--status-until", type=int, default=100, help="the percent of the whole export this ends at")
     command.set_defaults(run=merge)
     command = commands.add_parser("convert")
     command.add_argument("script")

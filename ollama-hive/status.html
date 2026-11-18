@@ -39,6 +39,8 @@ h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .dot.off { background: none; border: 1px solid var(--muted); }
 .dot.bad { background: var(--critical); }
 .no-training .training-only { display: none; }
+.progress { height: 8px; margin: 4px 0 2px; border: 1px solid var(--axis); border-radius: 3px; overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--series); }
 .memory { display: flex; height: 10px; margin: 4px 0 2px; border: 1px solid var(--axis); border-radius: 3px; overflow: hidden; gap: 1px; }
 .memory i { min-width: 2px; }
 .key { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
@@ -173,6 +175,14 @@ function lastStretch(steps, pace) {
   while (first > 0 && steps[first].t - steps[first - 1].t < AWAY_AFTER) first -= 1;
   // The first step's own time isn't between two steps: taken as a usual one
   return { seconds: steps[steps.length - 1].t - steps[first].t + pace, steps: steps.length - first, ended: steps[steps.length - 1].t };
+}
+
+// A status line that starts with "<number>% · " is a step of a long job (the export): the words, then a bar
+function withProgress(status) {
+  const found = /^(\d+)% · (.*)$/.exec(status || "");
+  if (!found) return status ? " · " + escaped(status) : "";
+  const percent = Math.min(100, Number(found[1]));
+  return ` · ${escaped(found[2])} · ${percent}%<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><i style="width:${percent}%"></i></div>`;
 }
 
 const escaped = text => String(text).replace(/[&<>"]/g, sign => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[sign]);
@@ -539,8 +549,8 @@ function render() {
     const doing = rig.status && rig.status.mode && rig.status.mode !== "train" ? `${rig.status.mode === "export" ? "making a model, then serving it" : "serving"}: ` : "";
     const making = rig.status && rig.status.export;
     const text = (!rig.status ? "Not answering: rented, off, or on another flight sheet"
-      : `${doing}${escaped(state || "starting")}${rig.status.status ? " · " + escaped(rig.status.status) : ""}`)
-      + (making ? `<br>Making a model beside it (export-run): ${escaped(making.state)}${making.status ? " · " + escaped(making.status) : ""}` : "")
+      : `${doing}${escaped(state || "starting")}${withProgress(rig.status.status)}`)
+      + (making ? `<br>Making a model beside it (export-run): ${escaped(making.state)}${withProgress(making.status)}` : "")
       + (problem ? `<br><span class="problem">${levelMark(LEVELS[0], `Not training: failed ${problem.failures > 1 ? problem.failures + " times in a row" : "to start"}, last at ${fullTime(problem.at)}`)}<br>${escaped(problem.error)}</span>` : "")
       + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "")
       + (rig.status ? gpuLines(rig.status) : "")

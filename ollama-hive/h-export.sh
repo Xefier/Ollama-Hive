@@ -13,8 +13,27 @@ OH_EXPORT_WORK="$OH_RUN_PATH/export"
 # which runs beside a flight sheet that has its own, names another
 OH_EXPORT_STATUS_FILE="$OH_RUN_DIR/train-status"
 
+# A line that starts with "<number>% · " is drawn as a progress bar by the page. The export's four steps take their
+# time in about these parts: 70% adding the adapter (which downloads the base model), 15% converting, 12% quantizing.
 export_says() {
     echo "$1" > "$OH_EXPORT_STATUS_FILE"
+}
+
+# For the next export_step, which writes one big file: says every 10 s how far that file is.
+# $1 the file, $2 its size when done (bytes, roughly), $3 and $4 the percents the step goes from and to, $5 the step
+export_watching() {
+    OH_WATCH_FILE=$1 OH_WATCH_WHOLE=$2 OH_WATCH_FROM=$3 OH_WATCH_TO=$4 OH_WATCH_TEXT=$5
+}
+
+# Ends with the step it watches, also when h-stop.sh kills that step
+export_watch() {
+    local step=$1 size
+    while kill -0 "$step" 2>/dev/null; do
+        size=$(stat -c %s "$OH_WATCH_FILE" 2>/dev/null || echo 0)
+        (( size > OH_WATCH_WHOLE )) && size=$OH_WATCH_WHOLE
+        export_says "$(( OH_WATCH_FROM + (OH_WATCH_TO - OH_WATCH_FROM) * size / (OH_WATCH_WHOLE > 0 ? OH_WATCH_WHOLE : 1) ))% · $OH_WATCH_TEXT"
+        sleep 10
+    done
 }
 
 find_export_settings_problem() {
@@ -25,9 +44,12 @@ find_export_settings_problem() {
 # Runs a long step so that a stop ends it at once, and h-stop.sh can find it
 export_step() {
     setsid "$@" >> "$LOG_FILE" 2>&1 &
-    echo "$!" > "$OH_RUN_DIR/export.pid"
-    wait $!
+    local step=$!
+    echo "$step" > "$OH_RUN_DIR/export.pid"
+    [[ -n $OH_WATCH_FILE ]] && export_watch "$step" &
+    wait "$step"
     local result=$?
+    OH_WATCH_FILE=""
     rm -f "$OH_RUN_DIR/export.pid"
     return $result
 }
@@ -42,7 +64,7 @@ install_export_tools() {
     [[ -f $stamp && -x $OH_QUANTIZE ]] && return 0
 
     oh_set_state installing
-    export_says "installing llama.cpp, which converts the model"
+    export_says "0% · installing llama.cpp, which converts the model"
     install_uv || return 1
     log "Installing llama.cpp $OH_LLAMA_CPP: the GGUF converter and llama-quantize"
     local release="https://github.com/ggml-org/llama.cpp"
@@ -118,17 +140,22 @@ export_model() {
         if [[ ! -f $full ]]; then
             [[ -d $merged ]] || export_has_space || return 1
             oh_set_state merging
-            export_says "step 1 of 4: adding the adapter to the base model's weights"
+            export_says "0% · step 1 of 4: adding the adapter to the base model's weights"
             log "Merging the adapter of run $OH_RUN_NAME into $OH_FULL_BASE"
             export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" merge \
-                --adapter "$adapter" --base "$OH_FULL_BASE" --out "$merged" --status-file "$OH_EXPORT_STATUS_FILE" || return 1
+                --adapter "$adapter" --base "$OH_FULL_BASE" --out "$merged" --status-file "$OH_EXPORT_STATUS_FILE" --status-until 70 || return 1
             oh_set_state converting
-            export_says "step 2 of 4: converting to the format Ollama reads"
+            export_says "70% · step 2 of 4: converting to the format Ollama reads"
             log "Converting to GGUF"
+            local whole
+            whole=$(du -sb "$merged" 2>/dev/null | cut -f 1)
             if [[ $direct == 1 ]]; then
+                # No quantizing step after it then, and 8 bits of every 16
+                export_watching "$final.tmp" "$(( ${whole:-0} / 2 ))" 70 97 "step 2 of 4: converting to the format Ollama reads"
                 export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" convert "$OH_CONVERT_SCRIPT" "$merged" --outfile "$final.tmp" --outtype q8_0 || return 1
                 mv "$final.tmp" "$final"
             else
+                export_watching "$full.tmp" "${whole:-0}" 70 85 "step 2 of 4: converting to the format Ollama reads"
                 export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" convert "$OH_CONVERT_SCRIPT" "$merged" --outfile "$full.tmp" --outtype bf16 || return 1
                 mv "$full.tmp" "$full"
             fi
@@ -136,8 +163,14 @@ export_model() {
         rm -rf "$merged"
         if [[ $direct != 1 ]]; then
             oh_set_state quantizing
-            export_says "step 3 of 4: quantizing to $OH_QUANT"
+            export_says "85% · step 3 of 4: quantizing to $OH_QUANT"
             log "Quantizing to $OH_QUANT"
+            # About what the levels leave of 16 bits a weight, in percent: near enough for a progress bar
+            local kept=30
+            case ${OH_QUANT^^} in
+                Q8*) kept=53 ;; Q6*) kept=41 ;; Q5*) kept=36 ;; Q4*) kept=30 ;; Q3*) kept=25 ;; Q2*) kept=20 ;;
+            esac
+            export_watching "$final.tmp" "$(( $(stat -c %s "$full" 2>/dev/null || echo 0) / 100 * kept ))" 85 97 "step 3 of 4: quantizing to $OH_QUANT"
             LD_LIBRARY_PATH="$(dirname "$OH_QUANTIZE")" export_step "$OH_QUANTIZE" "$full" "$final.tmp" "$OH_QUANT" || return 1
             mv "$final.tmp" "$final"
             rm -f "$full"
@@ -145,7 +178,7 @@ export_model() {
     fi
 
     oh_set_state importing
-    export_says "step 4 of 4: handing $OH_EXPORT_NAME to Ollama"
+    export_says "97% · step 4 of 4: handing $OH_EXPORT_NAME to Ollama"
     if ! "$OH_BIN" show "$OH_STOCK_MODEL" >/dev/null 2>&1; then
         log "Pulling $OH_STOCK_MODEL for its Modelfile and vision projector"
         export_step "$OH_BIN" pull "$OH_STOCK_MODEL" || return 1
