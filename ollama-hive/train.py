@@ -65,6 +65,9 @@ AUTO = "auto"       # max_len: every rig measures its own limit
 AUTO_TOP = 16384    # the longest example a rig tries then, and the longest the run knows of
 AUTO_STRIDE = 1024  # tokens between the lengths tried
 AUTO_USE = 0.9      # the part of the free GPU memory an example may take: the rest is for what moves around
+# Positions of an example scored against the vocabulary in one go. All at once is what the model's own loss does, and
+# with a vocabulary of 250,000 that takes some 5 GB per 1000 tokens, more than the rest of the model's work together.
+LOSS_CHUNK = 128
 
 
 def parse_args():
@@ -214,6 +217,11 @@ def find_limit(peak_at, budget, top=AUTO_TOP, stride=AUTO_STRIDE):
             break
         fits.append((length, peak))
     if not fits:
+        # Shorter than a stride then, rather than nothing: the rig still trains the examples that short
+        for length in (stride // 2, stride // 4, stride // 8):
+            peak = peak_at(length)
+            if peak is not None and peak <= budget:
+                return length
         return 0
     length, peak = fits[-1]
     if over is None or len(fits) < 2:
@@ -324,13 +332,46 @@ def sum_gradients(dist, torch, parameters):
         bucket = []
 
 
-def measure_limit(torch, model, tokenizer, parameters, device, say):
+def split_model(model):
+    """The model in two: what turns tokens into hidden states (adapter included), and the layer that scores a hidden
+    state against the vocabulary. None for a model that isn't built that way."""
+    whole = model.get_base_model() if hasattr(model, "get_base_model") else model
+    body = getattr(whole, getattr(whole, "base_model_prefix", ""), None)
+    head = whole.get_output_embeddings()
+    return (body, head) if body is not None and body is not whole and head is not None else None
+
+
+def example_loss(torch, parts, ids, labels):
+    """The model's loss on one example: how well each labelled token is predicted from those before it, averaged.
+    The same number as model(input_ids=ids, labels=labels).loss, on far less memory: only the labelled positions are
+    scored, LOSS_CHUNK at a time, and the scores of a chunk are worked out again for the gradient instead of all
+    being kept until then."""
+    from torch.utils.checkpoint import checkpoint
+
+    body, head = parts
+    hidden = body(input_ids=ids).last_hidden_state[0, :-1]
+    targets = labels[0, 1:]
+    labelled = (targets != -100).nonzero().squeeze(1)
+
+    def chunk_loss(states, wanted):
+        return torch.nn.functional.cross_entropy(head(states).float(), wanted, reduction="sum")
+
+    total = hidden.new_zeros((), dtype=torch.float32)
+    for start in range(0, len(labelled), LOSS_CHUNK):
+        positions = labelled[start:start + LOSS_CHUNK]
+        total = total + checkpoint(chunk_loss, hidden[positions], targets[positions], use_reentrant=False)
+    return total / max(1, len(labelled))
+
+
+def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say):
     """The longest example this GPU can train with the model as loaded: see find_limit. Nothing is learned from the
-    made-up examples. say: where to tell how it is going."""
+    made-up examples. loss_of: the loss of an example, as the training works it out. reserve: bytes the training
+    will take that aren't taken yet. say: where to tell how it is going."""
     import gc
 
     torch.cuda.empty_cache()
-    budget = torch.cuda.memory_allocated(device) + AUTO_USE * torch.cuda.mem_get_info(device)[0]
+    in_use, free = torch.cuda.memory_allocated(device), torch.cuda.mem_get_info(device)[0]
+    budget = in_use + AUTO_USE * (free - reserve)
     # An ordinary word over and over: memory goes by length, and a made-up token could be one the model reads as
     # the place of an image
     word = tokenizer(" the", add_special_tokens=False)["input_ids"][-1]
@@ -340,14 +381,14 @@ def measure_limit(torch, model, tokenizer, parameters, device, say):
         ids = loss = None
         try:
             ids = torch.full((1, length), word, device=device)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss = model(input_ids=ids, labels=ids).loss
+            loss = loss_of(ids, ids)
             loss.backward()
             peak = torch.cuda.max_memory_allocated(device)
         except RuntimeError as error:
             # Not always as torch.OutOfMemoryError: the libraries under PyTorch have their own ways of saying it
             if not isinstance(error, torch.OutOfMemoryError) and "memory" not in str(error).lower():
                 raise
+            log(f"  {str(error).splitlines()[0][:300]}")
             peak = None
         ids = loss = None
         for parameter in parameters:
@@ -358,6 +399,8 @@ def measure_limit(torch, model, tokenizer, parameters, device, say):
         say(f"measuring: {length} tokens " + ("ran out of memory" if peak is None else f"take {peak / 2 ** 30:.1f} GB"))
         return peak
 
+    log(f"The model takes {in_use / 2 ** 30:.1f} GB and {free / 2 ** 30:.1f} GB is free, of which "
+        f"{reserve / 2 ** 30:.1f} GB is kept for the optimizer and the exchange of gradients")
     say(f"measuring the longest example this GPU can train: up to {budget / 2 ** 30:.1f} GB may be used")
     return find_limit(peak_at, budget)
 
@@ -371,7 +414,7 @@ def limit_path(args, local_rank):
     return os.path.join(args.run_dir, f"limit-{local_rank}.json")
 
 
-def own_auto_limit(torch, args, model, tokenizer, parameters, device, cuda, local_rank, writer):
+def own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer, loss_of, reserve):
     """This GPU's limit under max_len=auto: measured once per run and GPU, and kept in the run's folder."""
     if args.limit is not None:
         return args.limit
@@ -394,14 +437,14 @@ def own_auto_limit(torch, args, model, tokenizer, parameters, device, cuda, loca
     if writer:
         write_line(args.state_file, "measuring")
     try:
-        limit = measure_limit(torch, model, tokenizer, parameters, device, say)
+        limit = measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say)
     except Exception as error:
         # Training goes on at the usual limit rather than not at all, and the next start measures again
         traceback.print_exc()
         say(f"measuring failed ({type(error).__name__}: {str(error)[:200]}): taking 2048 tokens for now")
         return 2048
     if not limit:
-        sys.exit(f"Not even an example of {AUTO_STRIDE} tokens fits on this GPU beside the model: "
+        sys.exit(f"Not even an example of {AUTO_STRIDE // 8} tokens fits on this GPU beside the model: "
                  "free its memory, or use a smaller base model or lora_r")
     say(f"this GPU takes examples up to {limit} tokens")
     write_line(limit_path(args, local_rank), json.dumps({"gpu": gpu_name(torch, device), "limit": limit}))
@@ -688,8 +731,21 @@ def main(args):
         round(torch.cuda.get_device_properties(device).total_memory / 2 ** 30) if cuda else 0)
     # Before any measuring: only a model that is training saves memory by recomputing its activations
     model.train()
+    parts = split_model(model)
+    if not parts:
+        log("This model doesn't come apart into a body and a vocabulary layer: its own loss is used, on more memory")
+
+    def loss_of(ids, labels):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=cuda):
+            return example_loss(torch, parts, ids, labels) if parts else model(input_ids=ids, labels=labels).loss
+
     if args.max_len == AUTO:
-        own_limit = own_auto_limit(torch, args, model, tokenizer, parameters, device, cuda, local_rank, writer)
+        # Adam keeps two numbers per weight from its first step on, and a step's gradients pass through one more
+        # copy of a bucket of them: not there yet in a new run, when the measuring is done
+        weights = sum(parameter.numel() for parameter in parameters) * 4
+        reserve = (0 if optimizer.state else 2 * weights) + min(weights, BUCKET * 4)
+        own_limit = own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer,
+                                   loss_of, reserve)
     else:
         own_limit = limit_for(parse_limits(args.max_len), memory)
     limits = [int(limit) for limit in share(dist, torch, device, rank, world, own_limit)]
@@ -840,8 +896,7 @@ def main(args):
                 ids, labels = examples[key]
                 ids = torch.tensor([ids], device=device)
                 labels = torch.tensor([labels], device=device)
-                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=cuda):
-                    loss = model(input_ids=ids, labels=labels).loss
+                loss = loss_of(ids, labels)
                 # Every example of the step weighs the same, whichever rig has it
                 (loss / len(batch)).backward()
                 # Reading the loss waits for the GPU, so the time is this example's

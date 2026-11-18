@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.10.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.11.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -279,6 +279,8 @@ few minutes, the miner log has every length with its memory, and the result is k
 tenth and starts again. The progress page shows every rig's limit. Examples longer than any rig of the run has been
 able to take stay in the dataset untrained, and are trained once a rig that can take them joins; over 16384 tokens
 they are left out. A length that the growth so far says would not fit is not tried, so the GPU should not actually run out; if the measuring fails for another reason, the rig says why on the progress page and trains with 2048 until its next start. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
+
+**GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 128 at a time; the loss and its gradients are the same. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
 
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
