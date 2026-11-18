@@ -29,6 +29,7 @@ the same conditions (the section heading).
 | **Q8 · 5090 · q8 KV** | qwen3.8:27b | Q8_0 | RTX 5090 (520 W) | q8_0 | 64k | 30.4 GB | 51–52 |
 | **Haiku 5.5** | claude-haiku-5-5 | API | — | — | — | — | — |
 | **Classrooms-tuned v1** | qwen3.8-unity:27b (LoRA on qwen3.8:27b) | Q4_K_M | rig 192.168.1.182 (card and power limit not recorded) | not recorded | 64k | 21.0 GB, 15.2 GB of it on the GPU | 22–34 |
+| **Classrooms-tuned v2** | qwen3.8-unity:27b (LoRA on qwen3.8:27b, run `unity-2`) | Q4_K_M | rig 192.168.1.189 (card and power limit not recorded), `num_parallel=3` | not recorded | 30k | 19.2 GB | 62–88 |
 
 ### Scores (12 answers each)
 
@@ -39,17 +40,18 @@ the same conditions (the section heading).
 | **Q8 · 5090 · q8 KV** | 8/12 | 12/12 | 6/12 | 60,700 | Claude 3.5 Sonnet; below Haiku 5.5 |
 | **Haiku 5.5** | 12/12 | 12/12 | 12/12 | ~22,000 (est.) | itself |
 | **Classrooms-tuned v1** | 5/12 | 9/12 | 3/12 | 80,249 | Claude 3 Sonnet to 3.5 Sonnet; below the untuned Q4 · 4090 |
+| **Classrooms-tuned v2** | 6/12 | 8/12 | 4/12 | 43,894 | Claude 3.5 Sonnet; below Haiku 5.5, level with the untuned Q4 · 4090 |
 
 ### Per task (run 1 / run 2)
 
-| Task | Q4 · 4090 | Q8 · 5090 · f16 | Q8 · 5090 · q8 KV | Haiku 5.5 | Classrooms-tuned v1 |
-|---|---|---|---|---|---|
-| t1 ring buffer | ✓ unusable / ✓ unusable | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ fixable |
-| t2 console command | ✓ fixable / ✗4 fixable | ✓ pass / ✓ fixable | ✓ pass / ✓ pass | ✓ minor / ✓ minor | ✗3 fixable / ✓ minor |
-| t3 editor window | ✓ minor / ✓ fixable | ✗1 fixable / ✗4 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ minor | ✗1 fixable / ✗1 unusable |
-| t4 bug fix | ✓ fixable / ✓ fixable | ✓ unusable / ✗4 fixable | ✓ fixable / ✓ fixable | ✓ pass / ✓ pass | ✗1 fixable / ✓ fixable |
-| t5 Find* removal | ✓ pass / ✓ minor | ✓ pass / ✓ minor | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✗4 fixable / ✓ pass |
-| w1 Apparel Editor | ✓ minor / ✗1 fixable | ✗3 unusable / ✗2 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ pass | ✗8 unusable / ✗4 unusable |
+| Task | Q4 · 4090 | Q8 · 5090 · f16 | Q8 · 5090 · q8 KV | Haiku 5.5 | Classrooms-tuned v1 | Classrooms-tuned v2 |
+|---|---|---|---|---|---|---|
+| t1 ring buffer | ✓ unusable / ✓ unusable | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✓ pass / ✓ fixable | ✓ fixable / ✗1 fixable |
+| t2 console command | ✓ fixable / ✗4 fixable | ✓ pass / ✓ fixable | ✓ pass / ✓ pass | ✓ minor / ✓ minor | ✗3 fixable / ✓ minor | ✓ fixable / ✗1 unusable |
+| t3 editor window | ✓ minor / ✓ fixable | ✗1 fixable / ✗4 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ minor | ✗1 fixable / ✗1 unusable | ✗4 unusable / ✗4 unusable |
+| t4 bug fix | ✓ fixable / ✓ fixable | ✓ unusable / ✗4 fixable | ✓ fixable / ✓ fixable | ✓ pass / ✓ pass | ✗1 fixable / ✓ fixable | ✓ pass / ✓ pass |
+| t5 Find* removal | ✓ pass / ✓ minor | ✓ pass / ✓ minor | ✓ pass / ✓ pass | ✓ pass / ✓ pass | ✗4 fixable / ✓ pass | ✓ minor / ✓ minor |
+| w1 Apparel Editor | ✓ minor / ✗1 fixable | ✗3 unusable / ✗2 fixable | ✗1 fixable / ✗1 fixable | ✓ pass / ✓ pass | ✗8 unusable / ✗4 unusable | ✗2 fixable / ✗1 unusable |
 
 ### Notes
 
@@ -73,6 +75,13 @@ the same conditions (the section heading).
   than untuned (`TheClassrooms-training/results/HELDOUT-RESULTS.md`). The rig held 15.2 GB of the 21.0 GB model on
   the GPU, hence 22–34 tok/s; that affects speed, not answers. w1 run 1 had no `// FILE:` line and was compiled
   under the right name by hand.
+- **Classrooms-tuned v2** (2026-11-18): trained on two 5090s (2 h 59 min) from 224 examples of up to 7,168 tokens,
+  all with declarations attached. About level with the untuned Q4 · 4090: fewer first-try compiles (6 against 10),
+  the same number correct as written (4). t4 and t5, the tasks closest to its training examples (a change to an
+  existing file), are right in all four runs; t3 and w1, whole new editor windows, are where it loses. Three answers
+  had no `// FILE:` line (t2 run 1, w1 both) and were compiled under the right name by hand. It used about half
+  v1's answer tokens. Run at 30k context with three requests at a time; one request failed with an HTTP 500 and was
+  rerun.
 
 Not yet run: **qwen3.5:27b · think · v2**, the fair qwen3.5 set (needs the owner to load qwen3.5:27b on the rig).
 
@@ -177,7 +186,8 @@ the task checks on each answer, not every answer read line by line.
 
 ### qwen3.8-unity:27b (Classrooms-tuned v1), 2026-11-18 (grader: a Claude Fable 5.2 reviewer)
 
-Folders: `results/qwen3.8-unity-27b/<task>-think` (run 1) and `<task>-think-r2` (run 2).
+Folders: `results/qwen3.8-unity-27b-v1/<task>-think` (run 1) and `<task>-think-r2` (run 2); renamed from
+`qwen3.8-unity-27b` when v2, which the rig serves under the same name, was run.
 
 - **t1 run 1:** ALL PASS; the window start is right before and after the buffer fills.
 - **t1 run 2, critical:** `Add` overwrites the oldest slot without subtracting it from the sum, so Mean is wrong once
@@ -206,6 +216,38 @@ Folders: `results/qwen3.8-unity-27b/<task>-think` (run 1) and `<task>-think-r2` 
   t1 passing once, `activeInHierarchy` chosen once). Worse on C# slips it did not make before (static methods reading
   instance members, an added `using` that makes a name ambiguous) and on new logic bugs (the inverted cancel test
   twice, GUIDs used as paths, the missing subtraction).
+
+### qwen3.8-unity:27b (Classrooms-tuned v2), 2026-11-18 (grader: a Claude Fable 5.2 reviewer)
+
+Folders: `results/qwen3.8-unity-27b-v2/<task>-think` (run 1) and `<task>-think-r2` (run 2).
+
+- **t1 run 1, critical:** the untuned model's bug: Percentile and the min/max scan start the window at the write
+  index, right only once the buffer is full. The same edit at 2 places passes every test.
+- **t1 run 2:** invented `Math.Ceil` (it is `Math.Ceiling`); with that word changed every test passes.
+- **t2 run 1, major:** no `// FILE:` line. The code is right as written: `JoinArgs(args, 0, ...)`, `-count` peeled
+  first, the 25-line cap, the total line, the help example.
+- **t2 run 2, unusable:** missing `using System`; `JoinArgs(args, 1, ...)` drops the first search word and
+  `tilefind Big` prints the help; a bare `tilefind` matches every tile; matches are printed with no line breaks.
+- **t3 run 1, unusable by a strict count:** a conditional inside a string interpolation, `StringComparison` without
+  `using System`, and the progress bar shown on every file instead of every 200. Three repairs; otherwise right.
+- **t3 run 2, unusable:** built largely on invented editor APIs (`EditorGUILayout.PropertyRef`,
+  `AssetDatabase.GetGUIDFromPath`, `EditorUtility.ShouldCancelProgress`, `[ExecuteMethod]`, ...), and its bullets
+  say they exist.
+- **t4, both runs:** the real fix: the three `StartCoroutine` calls through one helper guarded by
+  `gameObject.activeInHierarchy`, nothing else changed.
+- **t5 run 1, minor:** reuses `LightService.Instance` and deletes no `using`; its shared helper adds a try/catch to
+  two methods that had none.
+- **t5 run 2, minor:** four loops over `LightService.Instance`; an unrequested early return on an empty colour list,
+  disclosed in its bullets.
+- **w1 run 1, major:** no `// FILE:` line. Complete in structure with no invented APIs; the `Apparel` struct is
+  compared with null at 2 places, and removing those checks compiles.
+- **w1 run 2, unusable:** an invented namespace hides 6 more errors (`?.` on the struct, invented
+  `GUILayout.AlignFlag`, `IReadOnlyList.IndexOf`); the slot popup is off by one and each row stacks into four lines.
+- **Against Q4 · 4090 and v1:** it fixes what the untuned model got wrong every time (`activeInHierarchy` in both t4
+  runs, `JoinArgs(args, 0, ...)` once) and v1's own failure kinds are gone (static methods reading instance
+  members, the inverted cancel test, GUIDs used as paths). New: one answer built on invented APIs and three
+  without the `// FILE:` line. Two verdicts are judgement calls: counting the missing `// FILE:` line as a repair
+  would make w1 run 1 unusable (7/12); accepting t3 run 1 with its progress-bar defect would make it fixable (9/12).
 
 ### claude-haiku-5-5
 
@@ -253,3 +295,11 @@ in 12 against 10, and 3 answers usable as written against 4. It was trained on 6
 declarations, and it does better than the untuned model on fixes of that kind (the held-out set in
 `TheClassrooms-training`), but these six tasks mostly ask for whole new files and it lost ground on them. The next
 version (224 examples with declarations attached, up to 7,168 tokens) is the one to judge the approach by.
+
+**The second Classrooms fine-tune (2026-11-18) is about level with the model it came from here**: 6 first-try
+compiles in 12 against 10, 8 right after small repairs against 10, 4 correct as written against 4. It is clearly
+better than the first fine-tune on changes to existing files (t4 and t5 right in all four runs) and still loses on
+whole new editor windows, which its training examples do not contain. On the game's own held-out fixes it also ties
+the untuned model on correctness and beats it only on following the output format
+(`TheClassrooms-training/results/HELDOUT-RESULTS.md`). Fine-tuning on 224 accepted fixes has not yet made the model
+a better programmer for this game; it has made its answers easier to apply.
