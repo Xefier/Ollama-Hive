@@ -549,9 +549,11 @@ function render() {
     const doing = rig.status && rig.status.mode && rig.status.mode !== "train" ? `${rig.status.mode === "export" ? "making a model, then serving it" : "serving"}: ` : "";
     const making = rig.status && rig.status.export;
     // What the rig's Ollama has loaded. Not all of it on the GPU means part of it runs on the CPU, far slower.
+    const slots = rig.status && rig.status.parallel;
+    const atOnce = slots ? `, and answers ${slots === 1 ? "1 request at a time" : `${slots} requests at once`}` : "";
     const serving = ((rig.status && rig.status.models) || []).map(model => {
       const share = model.size ? Math.floor(100 * model.on_gpu / model.size) : 100;
-      return `<br>${escaped(model.name)} is loaded${model.context ? `, with ${number(model.context)} tokens of context a request` : ""}`
+      return `<br>${escaped(model.name)} is loaded${model.context ? `, with ${number(model.context)} tokens of context a request` : ""}${atOnce}`
         + (share < 100 ? `<br><span class="problem">${levelMark(LEVELS[1], `Only ${share}% of it is on the GPU`)}<br>The rest runs on the CPU, which makes every answer far slower. `
           + `It and its context don't fit this card's memory together: lower num_ctx or num_parallel, or set kv_cache_type=q8_0.</span>` : "");
     }).join("");

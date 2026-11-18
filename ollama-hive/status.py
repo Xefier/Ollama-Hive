@@ -198,6 +198,7 @@ def main():
     parser.add_argument("--memory-file", default="")
     parser.add_argument("--full-base", default="")
     parser.add_argument("--ollama", default="", help="http://address:port of this rig's Ollama, on a flight sheet that serves")
+    parser.add_argument("--parallel", type=int, default=0, help="requests that Ollama answers at once (num_parallel)")
     parser.add_argument("--mode", default="train", help="the flight sheet's: train, serve or export")
     parser.add_argument("--export-files", default="", help="export-run.sh's state and status files, less -state and -status")
     args = parser.parse_args()
@@ -231,6 +232,7 @@ def main():
                                 "state": read_line(args.state_file), "status": read_line(args.status_file),
                                 "problem": problem.read(args.problem_file), "gpus": seen["gpus"], "processes": seen["processes"],
                                 "memory": seen["memory"], "fullest": looks["fullest"], "models": seen["models"],
+                                "parallel": args.parallel,
                                 "log": bool(args.log_file)})
             elif url.path == "/history":
                 query = urllib.parse.parse_qs(url.query)

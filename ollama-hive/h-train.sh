@@ -151,18 +151,18 @@ plain_python() {
 # the rig is doing, its GPU memory and the miner log are worth seeing while it serves or exports too. h-stop.sh ends
 # it. It needs no package, so a rig that never trained runs it on the system's Python.
 start_status_page() {
-    local address python ollama=""
+    local address python ollama="" parallel=0
     address=$(oh_lan_address)
     [[ -n $address ]] || return
     # Where this rig's Ollama will be: the page says what it has loaded, and whether all of it is on the GPU
-    [[ $OH_MODE == train ]] || ollama="http://$address:$OH_PORT"
+    [[ $OH_MODE == train ]] || { ollama="http://$address:$OH_PORT"; parallel=$OH_NUM_PARALLEL; }
     python=$(plain_python) || { log "No Python on this rig for the progress page"; return; }
     mkdir -p "$OH_RUN_PATH"
     "$python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
         --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" --mode "$OH_MODE" \
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --log-file "$LOG_FILE" \
         --problem-file "$OH_PROBLEM_FILE" --memory-file "$OH_MEMORY_FILE" --full-base "$OH_FULL_BASE" \
-        --export-files "$OH_RUN_DIR/export" --ollama "$ollama" \
+        --export-files "$OH_RUN_DIR/export" --ollama "$ollama" --parallel "$parallel" \
         >> "$LOG_FILE" 2>&1 &
     echo "$!" > "$OH_RUN_DIR/status.pid"
     log "Progress page: http://$address:$OH_STATUS_PORT/"
