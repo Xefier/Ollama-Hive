@@ -6,9 +6,14 @@ meeting: the others tell it every few seconds that they are there, and it answer
 the group changes it gets a new number, and each rig then stops its worker (train.py saves first) and starts one for
 the new group, with the addresses and ranks PyTorch's distributed training reads from the environment.
 
-No rig is special. A rig looks for a peer that is hosting and hosts itself if none is; when the host leaves, the
-others notice within seconds and one of them takes over. Two that started hosting at the same moment sort it out by
-address: the higher one gives way.
+No rig is special and none is listed anywhere: every rig says on the LAN every few seconds that it is here for this
+run (Radio), so the flight sheet can go onto a rig or come off one and the others find out by themselves. A rig joins
+the host it hears and hosts itself if it hears none; when the host leaves, the others notice within seconds and one
+of them takes over. Two that started hosting at the same moment sort it out by address: the higher one gives way.
+
+A rig that is told to stop says so on the LAN at once, and the rigs training with it stop their workers there and
+then: the workers meet once per step, and without this the others would finish their part of the step first while
+the leaving rig, which has a rental waiting for its GPU, stands by.
 
 Standard library only.
 """
@@ -30,6 +35,9 @@ SETTLE = 12         # wait this long after a change for more changes, so rigs ar
 HOST_LOST = 10      # seconds without an answer before a rig looks for another host
 STOP_GRACE = 40     # seconds a worker gets to save and leave
 PORT_SPREAD = 8     # each group's workers meet on one of this many ports after the meeting port
+LISTEN = 5          # seconds a rig listens for a host before it hosts itself
+HEARD_FOR = 3 * BEAT        # a host not heard for this long isn't one to join
+FORGET = 7 * 24 * 3600      # a rig not heard for this long is no longer one of the run's rigs
 
 
 def log(text):
@@ -45,6 +53,100 @@ def ask(address, port, message, timeout=3):
         return json.loads(reply) if reply else None
     except (OSError, ValueError):
         return None
+
+
+def by_address(address):
+    return socket.inet_aton(address)
+
+
+class Radio:
+    """How the rigs of a run find each other. Every rig says every BEAT that it is here, and whether it hosts the
+    meeting: to the whole LAN by broadcast, and to the addresses of peers= one by one for a network that doesn't
+    carry broadcasts between the rigs. The rigs heard, with when, are kept in a file for the progress page."""
+
+    def __init__(self, me, port, run, targets, rigs_file):
+        self.me = me
+        self.run = run
+        self.targets = [(target, port) for target in targets if target != me]
+        self.rigs_file = rigs_file
+        self.hosting = False
+        self.leaving = False
+        self.heard = {}  # address -> when, and whether it was hosting or leaving
+        self.known = {}  # address -> when last heard, as in the file
+        try:
+            with open(rigs_file, encoding="utf-8") as handle:
+                self.known = {address: float(when) for address, when in json.load(handle).items()}
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+        self.written = None
+        self.receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.receiver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.receiver.bind(("", port))
+        # From this rig's LAN address, so it leaves by that interface and not by a Docker bridge
+        self.sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sender.bind((me, 0))
+        self.started = time.time()
+        threading.Thread(target=self.listen, daemon=True).start()
+        threading.Thread(target=self.speak, daemon=True).start()
+
+    def say(self):
+        message = json.dumps({"run": self.run, "address": self.me, "hosting": self.hosting,
+                              "leaving": self.leaving}).encode()
+        for target in self.targets:
+            try:
+                self.sender.sendto(message, target)
+            except OSError:
+                pass  # the network is down for a moment, or that address can't be reached from here
+
+    def speak(self):
+        while True:
+            self.say()
+            self.known[self.me] = time.time()
+            self.write_rigs()
+            time.sleep(BEAT)
+
+    def listen(self):
+        while True:
+            try:
+                message = json.loads(self.receiver.recv(2048))
+                if message["run"] != self.run or message["address"] == self.me:
+                    continue
+                by_address(message["address"])
+                now = time.time()
+                self.heard[message["address"]] = {"at": now, "hosting": bool(message["hosting"]),
+                                                  "leaving": bool(message.get("leaving"))}
+                self.known[message["address"]] = now
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # something else on the LAN uses this port
+
+    def write_rigs(self):
+        """When the rigs of the run change, and every minute for the times."""
+        now = time.time()
+        known = {address: round(when) for address, when in list(self.known.items()) if now - when < FORGET}
+        if self.written and set(known) == self.written[0] and now - self.written[1] < 60:
+            return
+        try:
+            with open(self.rigs_file + ".tmp", "w", encoding="utf-8") as handle:
+                json.dump(known, handle)
+            os.replace(self.rigs_file + ".tmp", self.rigs_file)
+            self.written = (set(known), now)
+        except OSError:
+            pass
+
+    def leavers(self):
+        """The rigs that said just now that they are stopping."""
+        now = time.time()
+        return [address for address, heard in list(self.heard.items())
+                if heard["leaving"] and now - heard["at"] < HEARD_FOR]
+
+    def host(self, lower_only=False):
+        """The rig to join: the lowest address heard hosting just now. None when there is none."""
+        now = time.time()
+        hosts = [address for address, heard in list(self.heard.items())
+                 if heard["hosting"] and not heard["leaving"] and now - heard["at"] < HEARD_FOR
+                 and not (lower_only and by_address(address) > by_address(self.me))]
+        return min(hosts, key=by_address, default=None)
 
 
 class Host:
@@ -114,7 +216,7 @@ class Host:
                     self.change()
             if self.pending and now - self.changed >= SETTLE:
                 self.count += 1
-                members = sorted(self.members.items(), key=lambda item: socket.inet_aton(item[0]))
+                members = sorted(self.members.items(), key=lambda item: by_address(item[0]))
                 self.group = {
                     "number": f"{self.me}/{os.getpid()}/{self.count}",
                     "members": [[address, member["workers"]] for address, member in members],
@@ -126,25 +228,15 @@ class Host:
 
 
 class Rig:
-    def __init__(self, args, command):
+    def __init__(self, args, command, radio):
         self.args = args
         self.command = command
-        self.peers = sorted(set(args.peers.split(",")), key=socket.inet_aton)
+        self.radio = radio
         self.workers = []
+        self.members = []    # the rigs the workers train with
         self.running = None  # the number of the group the workers were started for
         self.failed = None
         self.stopping = False
-
-    def find_host(self, lower_only=False):
-        for peer in self.peers:
-            if peer == self.args.me:
-                if lower_only:
-                    return None
-                continue
-            reply = ask(peer, self.args.port, {"op": "ping"}, timeout=2)
-            if reply and reply.get("host") == peer:
-                return peer
-        return None
 
     def stop_workers(self):
         for worker in self.workers:
@@ -173,7 +265,16 @@ class Rig:
             environment = dict(os.environ, MASTER_ADDR=addresses[0], MASTER_PORT=str(group["port"]),
                                WORLD_SIZE=str(world), RANK=str(first + local), LOCAL_RANK=str(local))
             self.workers.append(subprocess.Popen(self.command, env=environment))
+        self.members = addresses
         self.running = group["number"]
+
+    def end_group(self, why):
+        """Stops this rig's workers for good as far as their group goes, and has the host make a new one."""
+        log(f"{why}: asking for a new group")
+        number = self.running
+        self.stop_workers()
+        self.running = number
+        self.failed = number
 
     def finished(self):
         return bool(self.workers) and all(worker.poll() == 0 for worker in self.workers)
@@ -187,13 +288,13 @@ class Rig:
             self.start_workers(group)
         if self.workers and self.failed is None:
             codes = [worker.poll() for worker in self.workers]
+            leaving = [address for address in self.radio.leavers() if address in self.members]
             if any(code not in (None, 0) for code in codes):
                 # Ended without finishing: the rest of this rig's workers go too, and the host is told
-                log(f"A worker ended with code {[code for code in codes if code][0]}: asking for a new group")
-                number = self.running
-                self.stop_workers()
-                self.running = number
-                self.failed = number
+                self.end_group(f"A worker ended with code {[code for code in codes if code][0]}")
+            elif leaving:
+                # The workers save at once, without finishing a step the leaving rig has dropped
+                self.end_group(f"{', '.join(leaving)} is stopping")
         return False
 
     def host_session(self):
@@ -204,21 +305,22 @@ class Rig:
             time.sleep(5)
             return False
         log(f"No other rig is training: hosting the run on {self.args.me}:{self.args.port}")
-        checked = time.time()
+        self.radio.hosting = True
         try:
             while not self.stopping:
+                for address in self.radio.leavers():
+                    host.answer({"op": "leave", "address": address})
                 with host.lock:
                     host.failed(self.failed)
                 if self.follow(host.tick()):
                     return True
-                if time.time() - checked > 10:
-                    checked = time.time()
-                    lower = self.find_host(lower_only=True)
-                    if lower:
-                        log(f"{lower} is hosting a run too: giving way to it")
-                        return False
+                lower = self.radio.host(lower_only=True)
+                if lower:
+                    log(f"{lower} is hosting the run too: giving way to it")
+                    return False
                 time.sleep(1)
         finally:
+            self.radio.hosting = False
             host.close()
             self.stop_workers()
         return False
@@ -249,11 +351,16 @@ class Rig:
     def run(self):
         def on_stop(*_):
             self.stopping = True
+            self.radio.leaving = True
+            self.radio.say()
 
         signal.signal(signal.SIGTERM, on_stop)
         signal.signal(signal.SIGINT, on_stop)
+        # Long enough to hear a host that is there
+        while not self.stopping and time.time() - self.radio.started < LISTEN:
+            time.sleep(0.5)
         while not self.stopping:
-            host = self.find_host()
+            host = self.radio.host()
             finished = self.member_session(host) if host else self.host_session()
             if finished:
                 return 0
@@ -262,16 +369,24 @@ class Rig:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--peers", required=True, help="addresses of all rigs of the run, comma-separated")
-    parser.add_argument("--me", required=True, help="this rig's address, one of the peers")
+    parser.add_argument("--me", required=True, help="this rig's address")
+    parser.add_argument("--run", required=True, help="name of the run: rigs of another run are not heard")
+    parser.add_argument("--broadcast", default="255.255.255.255", help="broadcast address of this rig's LAN")
+    parser.add_argument("--peers", default="", help="rigs to tell one by one as well, comma-separated")
+    parser.add_argument("--rigs-file", required=True, help="where to keep the rigs heard, for status.py")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--workers", type=int, default=1, help="GPUs this rig trains on")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the worker's command line")
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if not command or args.me not in args.peers.split(","):
-        parser.error("need a worker command, and --me must be one of --peers")
-    sys.exit(Rig(args, command).run())
+    if not command:
+        parser.error("need a worker command")
+    try:
+        radio = Radio(args.me, args.port, args.run, [args.broadcast] + [peer for peer in args.peers.split(",") if peer],
+                      args.rigs_file)
+    except OSError as error:
+        sys.exit(f"[meet] Can't listen for the other rigs on port {args.port} ({error})")
+    sys.exit(Rig(args, command, radio).run())
 
 
 if __name__ == "__main__":

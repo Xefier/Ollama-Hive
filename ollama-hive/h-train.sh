@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# mode=train, sourced by h-run.sh: this rig is one worker of a QLoRA run shared between the rigs in peers=, all with
-# the same settings. train.py does the training; meet.py starts it, and starts it again whenever the group changes.
+# mode=train, sourced by h-run.sh: this rig is one worker of a QLoRA run shared between the rigs on the LAN that have
+# the same flight sheet. train.py does the training; meet.py finds the other rigs and starts it, again whenever the
+# group changes.
 # Rigs come and go as rentals take them, so no rig is special: the run goes on with whichever are here, down to one.
 # The run has no end: the dataset grows while it trains, and with nothing left to train the workers wait for more.
 # Nothing is installed into the system: Python, PyTorch, the base model and the run are all under $OH_TRAIN_DIR.
@@ -9,14 +10,10 @@
 find_train_settings_problem() {
     [[ -n $OH_BASE ]] || { echo "No base model set: add base=<Hugging Face repo> to the flight sheet"; return; }
     [[ -n $OH_DATASET ]] || { echo "No dataset set: add dataset=<URL or path of a .jsonl> to the flight sheet"; return; }
-    [[ -n $OH_PEERS ]] || { echo "No peers set: add peers=<LAN addresses of all rigs of the run, comma-separated>"; return; }
-    local peer address
-    for peer in $(oh_peers); do
+    local peer
+    for peer in ${OH_PEERS//,/ }; do
         oh_is_private "$peer" || { echo "peers= has $peer, which is not a private LAN address"; return; }
     done
-    address=$(oh_lan_address)
-    [[ -z $address ]] || grep -qxF "$address" <<< "$(oh_peers)" \
-        || echo "This rig's address $address is not in peers=$OH_PEERS: list every rig of the run, this one too"
 }
 
 # One worker per GPU listed in gpus=, and by default one GPU per rig
@@ -62,12 +59,16 @@ install_train_env() {
 
 # Runs meet.py, which trains with whichever rigs are there, until something breaks
 train_once() {
-    local address interface gpus workers
+    local address interface broadcast gpus workers
     address=$(oh_lan_address)
     [[ -n $address ]] || { log "No private LAN address found"; return 1; }
     echo "$address" > "$OH_RUN_DIR/address"
     # Named for NCCL, which otherwise may pick a Docker bridge for the traffic between the GPUs
-    interface=$(ip -o -4 addr show 2>/dev/null | awk -v a="$address" '{ split($4, p, "/"); if (p[1] == a) { print $2; exit } }')
+    # and the address that reaches every rig on this LAN, which is how they find each other (meet.py)
+    read -r interface broadcast < <(ip -o -4 addr show 2>/dev/null | awk -v a="$address" '{
+        split($4, p, "/")
+        if (p[1] == a) { for (i = 5; i < NF; i++) if ($i == "brd") b = $(i + 1); print $2, b; exit }
+    }')
     gpus=$(train_gpus)
     workers=$(awk -F, '{ print NF }' <<< "$gpus")
 
@@ -85,7 +86,7 @@ train_once() {
 
     local arguments=(--base "$OH_BASE" --dataset "$OH_DATASET" --run-dir "$OH_RUN_PATH"
         --epochs "$OH_EPOCHS" --max-len "$OH_MAX_LEN" --lora-r "$OH_LORA_R" --lr "$OH_LR"
-        --grad-accum "$OH_GRAD_ACCUM" --save-steps "$OH_SAVE_STEPS"
+        --step-size "$OH_STEP_SIZE" --save-steps "$OH_SAVE_STEPS"
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status")
 
     oh_set_state preparing
@@ -95,13 +96,12 @@ train_once() {
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
     wait "$SERVER_PID" || return 1
 
-    local nodes
-    nodes=$(oh_peers | wc -l)
     oh_set_state joining
     # Its own process group, so h-stop.sh also ends the workers it starts
     setsid "$OH_VENV/bin/python" "$OH_DIR/meet.py" \
-        --peers "$OH_PEERS" --me "$address" --port "$OH_TRAIN_PORT" --workers "$workers" -- \
-        "$OH_VENV/bin/python" "$OH_DIR/train.py" "${arguments[@]}" --nodes "$nodes" >> "$LOG_FILE" 2>&1 &
+        --me "$address" --port "$OH_TRAIN_PORT" --workers "$workers" --run "$OH_RUN_NAME" \
+        --broadcast "${broadcast:-255.255.255.255}" --peers "$OH_PEERS" --rigs-file "$OH_RIGS_FILE" -- \
+        "$OH_VENV/bin/python" "$OH_DIR/train.py" "${arguments[@]}" >> "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
 
@@ -126,7 +126,7 @@ start_status_page() {
     address=$(oh_lan_address)
     [[ -n $address ]] || return
     mkdir -p "$OH_RUN_PATH"
-    "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --peers "$OH_PEERS" \
+    "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
         --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" \
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" >> "$LOG_FILE" 2>&1 &
     log "Progress page: http://$address:$OH_STATUS_PORT/"

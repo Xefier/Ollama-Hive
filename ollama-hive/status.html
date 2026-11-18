@@ -55,7 +55,11 @@ th { color: var(--ink-2); font-weight: 500; }
 th:first-child, td:first-child { text-align: left; }
 .share { padding: 8px 0; border-top: 1px solid var(--grid); }
 .share:first-of-type { border-top: 0; }
-.share-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.share-head { display: flex; justify-content: space-between; align-items: center; gap: 4px 16px; flex-wrap: wrap; }
+.share-head .levels { display: flex; gap: 4px 16px; flex-wrap: wrap; }
+.verdict { margin: 4px 0; }
+.verdict .level { font-weight: 600; }
+.verdict span.why { color: var(--ink-2); font-weight: 400; }
 .share .note { margin: 6px 0 0; color: var(--ink-2); }
 .level { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .level i { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
@@ -74,11 +78,12 @@ th:first-child, td:first-child { text-align: left; }
   <p class="sub" id="sub">Asking the rigs…</p>
   <div class="rigs" id="rigs"></div>
   <div class="tiles" id="tiles"></div>
-  <div class="card"><h2>Where each rig's step time goes</h2>
+  <div class="card"><h2>Do the rigs hold each other up?</h2>
+    <div id="verdicts"></div>
     <p class="note" id="shares-note"></p>
     <div class="legend"><span><i style="background:var(--series)"></i>Computing on the GPU</span>
-      <span><i style="background:var(--idle)"></i>Waiting for a slower rig</span>
-      <span><i style="background:var(--ink-2)"></i>Sending gradients over the network (coloured by how much)</span></div>
+      <span><i style="background:var(--idle)"></i>Waiting for the other rigs to finish their part</span>
+      <span><i style="background:var(--ink-2)"></i>Exchanging gradients over the network</span></div>
     <div id="shares"></div></div>
   <div class="card"><h2>Training loss</h2><p class="note" id="loss-note"></p><div class="chart" id="loss"></div></div>
   <div class="card"><h2>Steps left to train</h2>
@@ -93,17 +98,26 @@ th:first-child, td:first-child { text-align: left; }
 </main>
 <script>
 "use strict";
-// The rigs to ask: ?rigs=a,b for a copy of this page opened from a file, otherwise the peers of the rig that served it
+// The rigs to ask: ?rigs=a,b for a copy of this page opened from a file, otherwise the rigs that the rig that served it has heard
 const query = new URLSearchParams(location.search);
 const port = query.get("port") || location.port || "29410";
 const rigs = new Map();   // address -> {next, lines, status}
 const POLL = 15000;
 const SHARE_STEPS = 100;      // the steps the time shares are taken over
-// Share of a step spent on the network from which it is worth a look, and from which it holds the run up
-const NETWORK_LEVELS = [
-  { from: 0.35, name: "critical", icon: "✕", text: "Holds the run up: a faster link between the rigs would pay off" },
+// Share of a rig's step time from which it is worth a look, and from which it holds the run up
+const LEVELS = [
+  { from: 0.35, name: "critical", icon: "✕", text: "Holds the run up" },
   { from: 0.15, name: "warning", icon: "!", text: "Worth a look" },
   { from: 0, name: "good", icon: "✓", text: "Fine" },
+];
+// The two ways rigs cost each other time: the key of the share, what to call it, and what helps when it is high
+const LOSSES = [
+  { key: "waiting", name: "Waiting", fine: "The rigs rarely wait for each other",
+    high: (address, share) => `${address} stands still ${share} of the time, waiting for the other rigs to finish their part`,
+    fix: "The work is not shared out evenly. A higher step_size gives more examples per step to balance with; one very long example in a step also makes the others wait." },
+  { key: "network", name: "Network", fine: "The network is not holding the rigs up",
+    high: (address, share) => `${address} spends ${share} of the time exchanging gradients`,
+    fix: "A faster link between the rigs would pay off; a higher step_size or a lower lora_r also means less to send per example." },
 ];
 const AWAY_AFTER = 30 * 60;   // a training rig silent this long has gone without saying so
 
@@ -133,7 +147,7 @@ async function askRig(address, rig) {
   const base = `http://${address}:${port}`;
   const [status, history] = await Promise.all([getJSON(`${base}/status`), getJSON(`${base}/history?from=${rig.next}`)]);
   rig.status = status;
-  if (status) addRigs(status.peers);
+  if (status) addRigs(status.rigs);
   if (!history) return;
   if (history.reset) rig.lines = [];
   rig.next = history.next;
@@ -148,7 +162,7 @@ async function poll() {
     if (query.get("rigs")) addRigs(query.get("rigs").split(","));
     else {
       const own = await getJSON("status");
-      if (own) addRigs(own.peers);
+      if (own) addRigs(own.rigs);
     }
   }
   await Promise.all([...rigs].map(([address, rig]) => askRig(address, rig)));
@@ -157,20 +171,22 @@ async function poll() {
 
 // ---- what the lines say
 
-// One entry per step, from whichever rigs took part in it: their losses averaged
+// One entry per step, from whichever rigs took part in it: the loss over all their examples
 function stepsOfRun() {
   const steps = new Map();
   for (const rig of rigs.values()) {
     for (const line of rig.lines) {
       if (line.e !== "step") continue;
       const step = steps.get(line.step) || { step: line.step, t: line.t, loss: 0, count: 0 };
-      step.loss += line.loss;
-      step.count += 1;
+      // ex: the examples of the step this rig had. A rig can have none, and then no loss.
+      const examples = line.loss === undefined ? 0 : line.ex === undefined ? 1 : line.ex;
+      step.loss += (line.loss || 0) * examples;
+      step.count += examples;
       if (line.t >= step.t) Object.assign(step, { t: line.t, left: line.left, n: line.n, rigs: line.rigs, size: line.size });
       steps.set(line.step, step);
     }
   }
-  return [...steps.values()].sort((a, b) => a.step - b.step).map(step => ({ ...step, loss: step.loss / step.count }));
+  return [...steps.values()].filter(step => step.count).sort((a, b) => a.step - b.step).map(step => ({ ...step, loss: step.loss / step.count }));
 }
 
 // Every line of every rig in time order, for what changes while nothing trains too (the dataset growing)
@@ -204,7 +220,35 @@ function timeShares(rig) {
   if (!steps.length) return null;
   const total = name => steps.reduce((sum, line) => sum + (line[name] || 0), 0);
   const network = total("net") / total("dur"), waiting = total("wait") / total("dur");
-  return { steps: steps.length, perStep: total("dur") / steps.length, network, waiting, computing: Math.max(0, 1 - network - waiting) };
+  const counted = steps.filter(line => line.ex !== undefined);
+  return { steps: steps.length, perStep: total("dur") / steps.length, network, waiting, computing: Math.max(0, 1 - network - waiting),
+    examples: counted.length ? counted.reduce((sum, line) => sum + line.ex, 0) / counted.length : null, size: steps[steps.length - 1].size };
+}
+
+const percent = value => `${Math.round(value * 100)}%`;
+const levelOf = share => LEVELS.find(entry => share >= entry.from);
+const levelMark = (level, text) => `<span class="level ${level.name}"><i style="background:var(--${level.name})">${level.icon}</i>${text}</span>`;
+
+// One line per way of losing time: the rig that loses most to it, and what to do when that is much
+function verdicts() {
+  const measured = [...rigs].map(([address, rig]) => ({ address, shares: timeShares(rig) })).filter(entry => entry.shares);
+  if (!measured.length) return "";
+  return LOSSES.map(loss => {
+    const worst = measured.reduce((a, b) => b.shares[loss.key] > a.shares[loss.key] ? b : a);
+    const share = worst.shares[loss.key], level = levelOf(share);
+    return `<p class="verdict">${levelMark(level, level.name === "good" ? `${loss.fine} (${percent(share)} at most)` : loss.high(worst.address, percent(share)))}
+      ${level.name === "good" ? "" : `<br><span class="why">${loss.fix}</span>`}</p>`;
+  }).join("");
+}
+
+// Of all the rigs' step time together, the part spent standing still for another rig
+function waitingOverall() {
+  const measured = [...rigs.values()].map(timeShares).filter(Boolean);
+  const time = measured.reduce((sum, shares) => sum + shares.perStep * shares.steps, 0);
+  if (!time) return "–";
+  const share = measured.reduce((sum, shares) => sum + shares.waiting * shares.perStep * shares.steps, 0) / time;
+  const level = levelOf(share);
+  return `${percent(share)} <span class="level ${level.name}" title="${level.text}"><i style="background:var(--${level.name})">${level.icon}</i></span>`;
 }
 
 function sharesRow(address, rig) {
@@ -214,14 +258,13 @@ function sharesRow(address, rig) {
       <p class="note">${rig.status ? "No steps together with another rig yet. A rig training alone sends nothing."
         : "Not answering, so its steps aren't known here."}</p></div>`;
   }
-  const level = NETWORK_LEVELS.find(entry => shares.network >= entry.from);
-  const percent = value => `${Math.round(value * 100)}%`;
   const part = (value, color) => value >= 0.005 ? `<span style="flex:${value};background:${color}"></span>` : "";
-  return `<div class="share"><div class="share-head"><b>${address}</b>
-      <span class="level ${level.name}"><i style="background:var(--${level.name})">${level.icon}</i>Network ${percent(shares.network)} · ${level.text}</span></div>
-    <div class="bar">${part(shares.computing, "var(--series)")}${part(shares.waiting, "var(--idle)")}${part(shares.network, `var(--${level.name})`)}</div>
-    <p class="note">Computing ${percent(shares.computing)} · waiting for a slower rig ${percent(shares.waiting)} · network ${percent(shares.network)}
-      · ${shares.perStep.toFixed(1)} s per step, over its last ${shares.steps} step${shares.steps > 1 ? "s" : ""} with other rigs</p></div>`;
+  const marks = LOSSES.map(loss => levelMark(levelOf(shares[loss.key]), `${loss.name} ${percent(shares[loss.key])} · ${levelOf(shares[loss.key]).text}`)).join("");
+  return `<div class="share"><div class="share-head"><b>${address}</b><span class="levels">${marks}</span></div>
+    <div class="bar">${part(shares.computing, "var(--series)")}${part(shares.waiting, "var(--idle)")}${part(shares.network, "var(--ink-2)")}</div>
+    <p class="note">Computing ${percent(shares.computing)} · waiting ${percent(shares.waiting)} · network ${percent(shares.network)}
+      · ${shares.perStep.toFixed(1)} s per step${shares.examples === null ? "" : `, of which it takes ${shares.examples.toFixed(1)} of the ${shares.size} examples`}
+      · over its last ${shares.steps} step${shares.steps > 1 ? "s" : ""} with other rigs</p></div>`;
 }
 
 // Stretches of training and waiting of one rig. Between them it was away.
@@ -391,8 +434,11 @@ function render() {
 
   $("rigs").innerHTML = [...rigs].map(([address, rig]) => {
     const state = rig.status ? rig.status.state : "";
-    const text = !rig.status ? "Not answering: rented, off, or on another flight sheet"
-      : `${state || "starting"}${rig.status.status ? " · " + rig.status.status : ""}`;
+    // lim: the longest example the rig takes, on every line it writes
+    const limit = rig.lines.length ? rig.lines[rig.lines.length - 1].lim : undefined;
+    const text = (!rig.status ? "Not answering: rented, off, or on another flight sheet"
+      : `${state || "starting"}${rig.status.status ? " · " + rig.status.status : ""}`)
+      + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "");
     return `<div class="rig"><i class="dot ${state === "training" ? "on" : rig.status ? "" : "off"}"></i><b>${address}</b><br><span>${text}</span></div>`;
   }).join("");
 
@@ -412,11 +458,12 @@ function render() {
     ["Steps left to train", latest ? number(stepsLeft) : "–"],
     ["Time left at this pace", !stepsLeft ? "–" : !pace ? "?" : hours >= 48 ? `${(hours / 24).toFixed(1)} days` : `${hours.toFixed(1)} h`],
     ["Rigs training now", `${answering.filter(rig => rig.status.state === "training").length} of ${rigs.size}`],
+    ["Step time spent waiting for each other", waitingOverall()],
   ];
   $("tiles").innerHTML = tiles.map(([label, value]) => `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`).join("");
 
-  $("shares-note").textContent = `Network under ${NETWORK_LEVELS[1].from * 100}% of a step is fine; over ${NETWORK_LEVELS[0].from * 100}% it holds the run up.`
-    + " The network share is an estimate: what the example that sends the gradients took beyond the others of its step.";
+  $("verdicts").innerHTML = verdicts();
+  $("shares-note").textContent = `A step ends when every rig has done its part, so a rig that is done early stands still. The work is shared out by each rig's speed to keep that short. Under ${LEVELS[1].from * 100}% of a rig's time is fine; over ${LEVELS[0].from * 100}% holds the run up.`;
   $("shares").innerHTML = [...rigs].map(([address, rig]) => sharesRow(address, rig)).join("");
 
   $("loss-note").textContent = width > 1 ? `Each point is the average of the last ${width} steps. Lower is better; it only measures the examples being trained.`

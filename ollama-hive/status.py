@@ -6,7 +6,7 @@ the run for theirs and draws them together, so it works with whichever rigs are 
 rented doesn't answer and shows as away.
 
   /          the page
-  /status    what this rig is doing now, and the addresses of the rigs of the run
+  /status    what this rig is doing now, and the addresses of the rigs of the run that it has heard (meet.py)
   /history   the lines train.py wrote since byte ?from=, for a page that keeps asking
 
 Read-only, and anything that can reach the port can read it. Standard library only.
@@ -28,6 +28,14 @@ def read_line(path):
             return handle.read().strip()
     except OSError:
         return ""
+
+
+def rigs_heard(path, me):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return sorted(set(json.load(handle)) | {me})
+    except (OSError, ValueError, TypeError):
+        return [me]
 
 
 def history_since(path, start):
@@ -52,7 +60,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--me", required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--peers", required=True)
+    parser.add_argument("--rigs-file", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--version", default="")
@@ -80,7 +88,7 @@ def main():
                 with open(os.path.join(HERE, "status.html"), "rb") as handle:
                     self.send(handle.read(), "text/html; charset=utf-8")
             elif url.path == "/status":
-                self.send_json({"address": args.me, "port": args.port, "peers": args.peers.split(","),
+                self.send_json({"address": args.me, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
                                 "state": read_line(args.state_file), "status": read_line(args.status_file)})
             elif url.path == "/history":

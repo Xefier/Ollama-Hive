@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.8.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.9.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -173,19 +173,22 @@ reach the dashboard.
 ## Training
 
 `mode=train` turns the flight sheet into one worker of a QLoRA fine-tune. Put the same settings on every rig that takes
-part, for example:
+part; the rigs find each other on the LAN, so no rig is listed anywhere. For example:
 
 ```
 mode=train
 base=unsloth/Qwen3.8-27B-unsloth-bnb-4bit
 dataset=http://192.168.1.50:8000/train.jsonl
-peers=192.168.1.189,192.168.1.232
 run_name=unity-1
+max_len=auto
 ```
 
 Each rig loads its own 4-bit copy of the base model on one GPU and joins PyTorch's distributed training with the other
 rigs that are training right now. On every step each rig works through its own examples, the adapter's gradients are
 averaged over the network, and every rig applies the same update, so all of them hold the same adapter throughout.
+The rigs don't have to be alike: a step's examples are shared out by how fast each rig is, so a faster GPU takes more
+of them and the rigs finish their parts at about the same time, and a GPU with more memory can take longer examples
+(`max_len`).
 It is in `<data_dir>/train/runs/<run_name>/adapter` on every rig, written again at every checkpoint.
 
 **The run has no end.** It is made to train for weeks on a dataset that something else keeps adding to (see
@@ -199,13 +202,13 @@ on with whichever rigs are on this flight sheet, down to one, and pauses only wh
 | `mode` | `serve` | `train` for a training run; the Ollama settings above are then unused. `export`: see [Serving a trained model](#serving-a-trained-model) |
 | `base` | none, required | Hugging Face repo of the base model. A `-bnb-4bit` repo is a ~18 GB download instead of ~56 GB |
 | `dataset` | none, required | `http(s)://` URL of a `.jsonl`, or a path on the rig. It doesn't have to be there yet, and one rig reaching it is enough |
-| `peers` | none, required | LAN addresses of all rigs of the run, comma-separated. Same value on every rig, itself included |
-| `run_name` | `run1` | Folder of the run. A new name starts again from the base model |
+| `peers` | none | Only for a network that doesn't carry broadcasts between the rigs: LAN addresses of rigs to tell one by one as well, comma-separated |
+| `run_name` | `run1` | Folder of the run, and what rigs on one LAN train together by. A new name starts again from the base model |
 | `epochs` | `3` | Times each example is trained |
-| `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory |
+| `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory. One number for every rig, or a limit per GPU memory size in GB: `24:2048,32:6144` gives a 24 GB card 2048 and a 32 GB card 6144. The examples only the larger card can hold go to it, and wait while it is rented. `auto`: every rig measures its own limit, see below |
 | `lora_r` | `16` | Adapter rank |
 | `lr` | `2e-4` | Learning rate, reached over 10 warm-up steps and then held: there is no end to come down to |
-| `grad_accum` | `4` | Examples per rig per step when all rigs are there. A step is always `grad_accum` x the number of `peers` examples: with rigs away, the ones left each do more of it |
+| `step_size` | `8` | Examples per step, shared between the rigs training at that moment by their speed: one alone does all 8. A higher value gives more to balance with, and less network traffic per example. It replaces `grad_accum`, and a run started with that needs a new `run_name` |
 | `save_steps` | `25` | Steps between checkpoints. A stop saves too, so this only matters for a crash or a power cut |
 | `train_port` | `29400` | Port the rigs meet on. The firewall rules guard this port in train mode |
 | `torch_index` | `cu128` | PyTorch wheel index. `cu128` needs NVIDIA driver 570 or newer (an RTX 5090 needs it anyway) |
@@ -251,8 +254,9 @@ After each task you finish, append one line to the file: a JSON object
 {"role": "assistant", "content": ...}]} where the user message is the task with the
 code it needed, and the assistant message is the fix as it was finally accepted.
 One example per line, UTF-8, no line breaks inside a line. Only append; never
-rewrite earlier lines. Keep each example under about 2000 tokens, and leave out
-tasks that failed or were reverted.
+rewrite earlier lines. Keep each example under about 2000 tokens (or the longest
+the rigs take, which their progress page shows), and leave out tasks that failed
+or were reverted.
 ```
 
 Three things in it matter to the training: the model learns only the last assistant message, so the fix has to be
@@ -267,17 +271,29 @@ What can be used at any time is the `adapter` folder: `mode=export` makes an Oll
 PyTorch and the packages in `requirements-train.txt` (about 8 GB), and the base model. A rig switched to another
 flight sheet keeps them for the next run.
 
+**`max_len=auto`.** Each rig finds out by itself how long an example its GPU can train. The first time it has the
+model loaded for a run, it trains made-up examples of growing length (1024 tokens, 2048, 3072, ...) and reads how much
+GPU memory each took, until one would take more than 90% of what was free; nothing is learned from them. That takes a
+few minutes, the miner log has every length with its memory, and the result is kept in the run's folder
+(`limit-0.json`), so later starts skip it. A rig that still runs out of memory in training lowers its own limit by a
+tenth and starts again. The progress page shows every rig's limit. Examples longer than any rig of the run has been
+able to take stay in the dataset untrained, and are trained once a rig that can take them joins; over 16384 tokens
+they are left out. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
+
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
 
 **Progress page.** Every rig on the training flight sheet serves one at `http://<rig>:29410/` (`train_port` + 10;
-the miner log has the link). Open it from any rig, on any device on the LAN: it asks all `peers` and draws them
-together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
-the size of the dataset, and when each rig was training, waiting or away. It also shows, per rig, how a step's time
-divides between computing, waiting for a slower rig, and sending the gradients over the network, with the network
-share marked fine (under 15%), worth a look, or holding the run up (over 35%): that is where to see whether the link
-between the rigs is worth upgrading. The network share is an estimate, taken from how much longer the example that
-sends the gradients takes than the other examples of its step. A rented rig doesn't answer and its part
+the miner log has the link). Open it from any rig, on any device on the LAN: it asks every rig that rig has heard in the last week and draws
+them together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
+the size of the dataset, and when each rig was training, waiting or away. **Do the rigs hold each other up?** A step
+ends when every rig has done its part, so a rig that is done early stands still until the slowest is. The page shows,
+per rig, how its step time divides between computing, waiting for the other rigs, and exchanging the gradients over
+the network, with the waiting and the network share each marked fine (under 15%), worth a look, or holding the run up
+(over 35%), and at the top which rig loses most and what would help. Much waiting means the work isn't shared out
+evenly: a higher `step_size` gives more examples to balance with, and a step with one very long example makes the
+others wait however it is shared. A large network share is where to see that the link between the rigs is worth
+upgrading. Both are measured: the rigs meet once at the end of every step. A rented rig doesn't answer and its part
 of the history is missing until it is back; with every rig rented there is no page. Each rig keeps its history in
 `<data_dir>/train/runs/<run_name>/history.jsonl`, one line per step. The page is read-only, and like the training
 ports it is as open as the rig leaves it: anything on the LAN can read the run's progress.
@@ -287,7 +303,7 @@ would compile or fix the task: for that the exported model has to write the answ
 (see `eval/`).
 
 **Network.** A rank 16 adapter on a 27B model is about 110 M weights, and each rig sends them once per step (~450 MB).
-On 1 Gbit/s that is several seconds a step, so a higher `grad_accum` means less time on the wire per example; 2.5 or
+On 1 Gbit/s that is several seconds a step, so a higher `step_size` means less time on the wire per example; 2.5 or
 10 Gbit/s between the rigs helps directly. The firewall rules cover `train_port` only: the GPU-to-GPU traffic uses
 ports chosen at run time (the first is one of the 8 after `train_port`), which are as open as the rig leaves them,
 and anything `allow` admits can join a run. Rigs take the dataset from each other as well as from `dataset`, so
@@ -298,14 +314,18 @@ whatever can join a run can also feed it examples.
 A rental, a reboot or a flight sheet switch can take any rig at any time, and it comes back when it is idle again.
 No rig has to stay: the run pauses only while every rig is away.
 
-- **A rig is stopped** (Octa stops the miner for a rental): its worker tells the others before the next example,
-  every rig saves, and the rest carry on without it about half a minute later, plus the time to load the model again.
-  Nothing trained is lost. The stopped rig frees its GPU as soon as it has saved, normally within seconds; after 40 s
-  it is killed regardless.
+- **A rig is stopped** (Octa stops the miner for a rental): it says so on the LAN at once, every rig finishes the
+  example it is on, drops the step in progress and saves, and the rest carry on without it about half a minute
+  later, plus the time to load the model again. Only that one step is lost. The stopped rig frees its GPU as soon as
+  it has saved, normally within seconds; after 40 s it is killed regardless.
 - **A rig comes back:** the others save, and all start again together. It takes the newest checkpoint and the newest
   dataset over the network if its own are older.
 - **A rig dies without warning** (power, a crash): the others lose the steps since the last checkpoint
   (`save_steps`), and notice within seconds, or after 20 minutes without a finished step in the worst case.
+- **Finding each other:** every rig on the flight sheet says so on the LAN every 2 seconds (a UDP broadcast on
+  `train_port`, with the `run_name`), and joins the rigs it hears. Putting the flight sheet on another rig adds it to
+  the run and taking it off removes it; nothing else has to change, and a rented rig is simply not heard. The rigs
+  must be on one subnet, or reach each other through `peers`.
 - **Who is in charge:** nobody in particular. One rig hosts the meeting on `train_port` (the lowest address, when
   several start together); when it leaves, another takes over within about 10 seconds.
 - **Rigs that are never idle together** each continue from their own checkpoint. When two such rigs meet again, the
@@ -314,10 +334,14 @@ No rig has to stay: the run pauses only while every rig is away.
 - Every change of the group costs each rig a reload of the model, a minute or more for a 27B. Rentals that start and
   stop every few minutes would leave little time for training.
 
-**Tested** so far only on CPU, with a small model and two rigs on one machine: training together, one joining a run in
-progress, one stopped mid-run (the other went on at the same step), the hosting rig stopped (the other took over),
+**Tested** so far only on CPU, with a small model and two or three rigs on one machine: finding each other by
+broadcast, training together, one joining a run in progress, one stopped mid-run (the other went on at the same step), the hosting rig stopped (the other took over),
 waiting for a dataset that isn't there yet, taking up examples added during the run (on a rig that can't reach the
-source too), and both ending up with identical adapters. Not yet run on the rigs: the 4-bit load of a 27B model, memory use at
+source too), a rig with a lower `max_len` limit leaving the long examples to the other and waiting for it when alone,
+sharing a step by speed, and both ending up with identical adapters. Not yet run on the rigs: measuring a
+GPU's limit for `max_len=auto` (only its search was tested, on made-up numbers), how evenly the work is shared between
+two real GPUs, the broadcast between
+real machines, the 4-bit load of a 27B model, memory use at
 `max_len=2048` on 24 GB, and the traffic between two real GPUs.
 
 ## Serving a trained model

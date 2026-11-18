@@ -42,7 +42,7 @@ OH_EPOCHS=3
 OH_MAX_LEN=2048
 OH_LORA_R=16
 OH_LR=2e-4
-OH_GRAD_ACCUM=4
+OH_STEP_SIZE=8
 OH_SAVE_STEPS=25
 OH_TORCH_INDEX=cu128
 # mode=export: the Ollama model made of a finished run. See h-export.sh.
@@ -63,6 +63,8 @@ OH_STATUS_PORT=$((OH_TRAIN_PORT + 10))
 OH_TRAIN_DIR="$OH_DATA_DIR/train"
 OH_VENV="$OH_TRAIN_DIR/venv"
 OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
+# The rigs of the run that this one has heard: meet.py keeps it, status.py reads it
+OH_RIGS_FILE="$OH_RUN_PATH/rigs.json"
 
 OH_BIN="$OH_DATA_DIR/bin/ollama"
 # The address h-run.sh is serving on. Ollama doesn't listen on 127.0.0.1 here, so this is how to reach it on the rig too.
@@ -110,11 +112,6 @@ oh_remove_firewall() {
     done
     # iptables can create a chain on a kernel where it then can't read or delete it
     command -v nft >/dev/null 2>&1 && nft delete chain ip filter "$OH_CHAIN" 2>/dev/null
-}
-
-# The rigs of a training run, lowest address first: the order that settles which rig the others meet at
-oh_peers() {
-    tr ',' '\n' <<< "$OH_PEERS" | sort -V -u
 }
 
 # Ends a process group this miner started with setsid: asks, waits up to $2 seconds, then kills what is left

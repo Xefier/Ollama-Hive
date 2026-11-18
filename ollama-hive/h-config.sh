@@ -16,7 +16,9 @@ ollama_hive_valid() {
         # No & ; or quotes: h-run.sh sources this value
         dataset)                        [[ $2 =~ ^(https?://[A-Za-z0-9._:/%=+?-]+|/[A-Za-z0-9._/-]+)$ ]] ;;
         peers)                          [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(,[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)*$ ]] ;;
-        train_port|epochs|max_len|lora_r|grad_accum|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
+        train_port|epochs|lora_r|step_size|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
+        # One limit, one per GPU memory size in GB (24:2048,32:6144), or auto: every rig measures its own
+        max_len)                        [[ $2 =~ ^(auto|[1-9][0-9]*(:[1-9][0-9]*(,[1-9][0-9]*:[1-9][0-9]*)*)?)$ ]] ;;
         lr)                             [[ $2 =~ ^[0-9]+(\.[0-9]+)?(e-?[0-9]+)?$ ]] ;;
         run_name)                       [[ $2 =~ ^[A-Za-z0-9._-]+$ ]] ;;
         torch_index)                    [[ $2 =~ ^(cu[0-9]+|cpu)$ ]] ;;
