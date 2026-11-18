@@ -17,6 +17,9 @@ OUT=Library/LocalModelEval; mkdir -p "$OUT"
 VER=$(sed -n 's/^m_EditorVersion: //p' ProjectSettings/ProjectVersion.txt | tr -d '\r')
 E="C:/Program Files/Unity/$VER/Editor/Data"
 [ -d "$E" ] || E="C:/Program Files/Unity/Hub/Editor/$VER/Editor/Data"
+[ -d "$E" ] || E="D:/Unity/Hub/Editor/$VER/Editor/Data"
+[ -d "$E" ] || E=$UNITY_EDITOR_DATA
+[ -d "$E" ] || { echo "Unity $VER not found: set UNITY_EDITOR_DATA to its Editor/Data folder"; exit 2; }
 SRC=$(ls -t Library/Bee/artifacts/*.dag/"$ASM.rsp" 2>/dev/null | head -1)
 [ -n "$SRC" ] || { echo "no $ASM.rsp under $UNITY_PROJECT/Library/Bee/artifacts: let the editor compile once"; exit 2; }
 RSP="$OUT/$ASM.test.rsp"
