@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.13.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.14.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -281,15 +281,15 @@ quarter and starts again. The progress page shows every rig's limit. Examples lo
 able to take stay in the dataset untrained, and are trained once a rig that can take them joins; over 16384 tokens
 they are left out. A length that the growth so far says would not fit is not tried, so the GPU should not actually run out; if the measuring fails for another reason, the rig says why on the progress page and trains with 2048 until its next start. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
 
-**GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 32 at a time, and in the vocabulary layer's own number format: left to PyTorch's automatic mixed precision, every example first made a 2.4 GB copy of that whole layer. The loss and its gradients are the same. Two more things make room without changing what the model computes. The input layer, a second table of the same size that an example reads a few hundred rows of, is kept in the computer's memory instead of the GPU's (2.4 GB of RAM for Qwen3.8, so a rig needs that much to spare). And the weights that are stored as float16 are turned into bfloat16, the format the training computes in, once at the start instead of at every use. A 4-bit 27B with a rank 16 adapter then takes about 18 GB, so a 24 GB card has some 4 GB left for the examples: `lora_r=8` gives it about 1 GB more. A GPU that runs out of memory doesn't always say so: it also shows as a cuBLAS error, which the trainer takes for the same thing. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
+**GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 32 at a time, and in the vocabulary layer's own number format: left to PyTorch's automatic mixed precision, every example first made a 2.4 GB copy of that whole layer. The loss and its gradients are the same. Two more things make room without changing what the model computes. The input layer, a second table of the same size that an example reads a few hundred rows of, is kept in the computer's memory instead of the GPU's (2.4 GB of RAM for Qwen3.8, so a rig needs that much to spare). And the weights that are stored as float16 are turned into bfloat16, the format the training computes in, once at the start instead of at every use. A 4-bit 27B with a rank 16 adapter then takes about 18 GB, so a 24 GB card has some 4 GB left for the examples: `lora_r=8` gives it about 1 GB more. PyTorch is also told to keep its GPU memory in a way that lets it give back what it frees (`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, set by the trainer unless the rig sets its own): with its usual way, loading left 4 GB of a 24 GB card held but unusable. A GPU that runs out of memory doesn't always say so: it also shows as a cuBLAS error, which the trainer takes for the same thing. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
 
 **`speedups=1`.** Three of every four layers of Qwen3.5/3.8 are of a kind (Gated DeltaNet) that the model's library
 runs on plain PyTorch code it calls "correct but much slower" unless the `flash-linear-attention` package is there.
 With `speedups=1` the miner installs it (`requirements-speedups.txt`), and every start tries it out on the GPU
-before the model is loaded: its fast code is compiled on the rig the first time, and if that fails, or the package
+before the model is loaded: its fast code is compiled on the rig the first time, which needs a C compiler there (`cc`, `gcc` or `clang`), and if that fails, or the package
 didn't install, the rig trains without it and the miner log says why. The rigs of a run don't all have to have it.
-With `max_len=auto` a rig measures its limit again when this changes. Off by default because it has not run on a
-GPU here yet: turn it on once a rig trains, and compare the seconds per step on the progress page. The other package
+With `max_len=auto` a rig measures its limit again when this changes. It has run on an RTX 5090 with a small model of this architecture, not yet with a 27B: turn it on once a rig
+trains, and compare the seconds per step on the progress page. The other package
 the library asks for, `causal-conv1d`, is not installed: it needs a CUDA compiler on the rig.
 
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
@@ -367,11 +367,11 @@ broadcast, training together, one joining a run in progress, one stopped mid-run
 waiting for a dataset that isn't there yet, taking up examples added during the run (on a rig that can't reach the
 source too), a rig with a lower `max_len` limit leaving the long examples to the other and waiting for it when alone,
 sharing a step by speed, a rig whose worker can't start being shown with its error and sitting out while the other
-trains, and both ending up with identical adapters. Not yet run on the rigs: measuring a
-GPU's limit for `max_len=auto` (only its search was tested, on made-up numbers), how evenly the work is shared between
-two real GPUs, the broadcast between
-real machines, the 4-bit load of a 27B model, memory use at
-`max_len=2048` on 24 GB, and the traffic between two real GPUs.
+trains, and both ending up with identical adapters. On one GPU (an RTX 5090), with a small model and with a small
+random model of the Qwen3.5/3.8 architecture: the 4-bit load, the input layer off the GPU, measuring the limit for
+`max_len=auto`, training, and `speedups=1`. A 4090 has loaded the 27B itself and reported its memory, and not yet
+trained a step. Not yet run at all: how evenly the work is shared between two real GPUs, the broadcast between real
+machines, and the traffic between two real GPUs.
 
 ## Serving a trained model
 

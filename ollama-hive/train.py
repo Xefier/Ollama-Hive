@@ -47,6 +47,13 @@ import urllib.request
 
 import problem
 
+# Before PyTorch is loaded, which reads it once. Loading a model frees big blocks of GPU memory and reuses them in
+# pieces, and PyTorch's usual way of keeping memory can't give a block back, or use it whole, while a piece of it is
+# taken: on a 24 GB card that left 4 GB out of reach beside a 27B model. This way it can. Both names: the first is
+# the one PyTorch has always read, the second the one it is moving to.
+for name in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF"):
+    os.environ.setdefault(name, "expandable_segments:True")
+
 VISION_OR_HEAD = re.compile(r"(^|\.)(visual|vision\w*|merger|multi_modal_projector|lm_head|mtp\w*)(\.|$)")
 CHUNK = 256 * 1024 * 1024
 CHECK = 60          # seconds between looks at the dataset's source
@@ -409,7 +416,12 @@ def lighten(torch, model):
         torch.cuda.empty_cache()
     for parameter in model.parameters():
         if parameter.dtype == torch.float16 and parameter.device.type == "cuda":
-            parameter.data = parameter.data.to(torch.bfloat16)
+            # By way of the computer's memory, so that the old one is gone from the GPU before the new one comes:
+            # the vocabulary layer alone is 2.4 GB
+            device = parameter.device
+            changed = parameter.data.to("cpu", torch.bfloat16)
+            parameter.data = torch.empty(0, dtype=torch.bfloat16)
+            parameter.data = changed.to(device)
     # The 4-bit layers unpack their weights into the format they were saved with, float16 here: the same copying
     for module in model.modules():
         if getattr(module, "compute_dtype", None) == torch.float16:
@@ -454,7 +466,9 @@ def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say, t
     import gc
 
     torch.cuda.empty_cache()
-    in_use, free = torch.cuda.memory_allocated(device), torch.cuda.mem_get_info(device)[0]
+    in_use = torch.cuda.memory_allocated(device)
+    # What PyTorch holds without using it is as free to the training as what nothing holds
+    free = torch.cuda.mem_get_info(device)[0] + torch.cuda.memory_reserved(device) - in_use
     budget = in_use + AUTO_USE * (free - reserve)
     # An ordinary word over and over: memory goes by length, and a made-up token could be one the model reads as
     # the place of an image
@@ -785,6 +799,11 @@ def main(args):
         log(f"GPU {local_rank}: {torch.cuda.get_device_name(device)}, {free / 2 ** 30:.1f} of {total / 2 ** 30:.1f} GB free")
     else:
         log("No GPU that PyTorch can use: training on the CPU")
+    if cuda:
+        # The library that multiplies matrices takes its own bit of GPU memory the first time it is used. Now, while
+        # there is room: later it would have to find it beside the model, and fails in ways that don't say memory.
+        for kind in (torch.float32, torch.bfloat16):
+            torch.ones(8, 8, device=device, dtype=kind) @ torch.ones(8, 8, device=device, dtype=kind)
     set_up_speedups(torch, args.speedups, device, cuda)
 
     # A stop (the flight sheet ending, or meet.py regrouping because a rig joined) is only noted here. The loop
