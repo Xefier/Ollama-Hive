@@ -132,6 +132,51 @@ else; after pulling a client change, run `add` again so the registration picks i
 `client\local_llm_mcp.py`, so a pull updates the client too; after moving the clone, run `add` again. Files are read on the worker PC, only from the session's working directory unless `LOCAL_LLM_ROOTS`
 says otherwise, and go to the rig over plain HTTP on your LAN.
 
+### Writing code: `local_llm_code`
+
+`local_llm_ask` sends a prompt as it is. `local_llm_code` is for one job, a C# change in a Unity project, and wraps
+the model in what measurably stops it inventing names (results and method: [eval/RESULTS.md](eval/RESULTS.md),
+"The code pipeline"). Claude gives it the change request, the files it applies to and the project root; it returns
+the change as a diff with a short report, and writes nothing in the project.
+
+| Input | |
+|---|---|
+| `request` | The change, self-contained: what is wrong, what should happen, and the mechanism to use if Claude knows it |
+| `files` | Paths (absolute or relative to the project), all in one assembly. A file up to 16,000 characters is sent and returned whole; a longer one as `{"path": ..., "lines": "120-180, 300-340"}`, whole methods, returned as those ranges changed. A path that does not exist is a new file |
+| `project` | The Unity project root. It must be inside the session's folder or `LOCAL_LLM_ROOTS`, and its editor must have compiled once (`Library/Bee` holds the compiler arguments) |
+| `tries`, `system`, `think` | Optional: tries sent at once (default `LOCAL_LLM_PARALLEL`, else 3: set it to the rigs' `num_parallel`), a system prompt instead of the default (the project's house rules), thinking off |
+
+What happens inside (`client/code_pipeline.py`):
+
+1. **Context.** The declarations (signatures, no bodies) of what the change can call are attached to the prompt,
+   most relevant first, within a character budget: the files' own types in full; the project types the request and
+   code name; the declared types of the members the code uses; base types; and the member names of the compiled
+   types the code names or inherits from (Unity, Fusion, packages, plugin DLLs, .NET). Then one **ask-first pass**:
+   the model reads the request and code and answers only with what it needs to see (`NEED: Fusion.NetworkObject`,
+   `NEED: how the player's death is announced`); exact names are looked up, descriptions are searched for in the
+   project's type and member names, its source text and the compiled type names, and what is found is attached.
+2. **Compile and retry.** The answer is spliced into a scratch copy and compiled as the whole assembly, with the
+   compiler arguments Unity wrote for it (`client/code_compile.py`; seconds, no editor). On errors the model gets one
+   more try with the compiler's messages and the declarations of every type they name.
+3. **Several tries.** The tries are sent at once and each is compiled. The first that compiles is returned; a retry
+   happens only when none does; if none compiles even then, the one with the fewest errors comes back, marked
+   `DOES NOT COMPILE`.
+
+A request that comes back empty because thinking used the whole context (`done_reason: length`) is sent once more with
+thinking off. The report says which tries compiled, how the compiling ones differ, what was attached, what the model
+asked for and what the call cost. **Compiling shows that the names exist, not that the change is right**: Claude
+still reviews the diff before applying it.
+
+The index behind step 1 (`client/code_index.py`) has two halves, both kept in
+`%LOCALAPPDATA%\local-llm\code\<project>\` and rebuilt only for files whose size or time changed: the project's own
+types, scanned from the `.cs` files Unity compiles under `Assets/`, and the public API of every assembly the code's
+own assembly references (the `-r:` lines of its compiler arguments: on The Classrooms 457 assemblies, among them
+Unity's modules, every package and asmdef, Fusion and the plugin DLLs, with the summaries of an `.xml` file beside
+a DLL). The compiled half is read by `client/apidump`, a small .NET tool on System.Reflection.Metadata that the
+client builds on first use: it needs the **.NET SDK** (`dotnet`, version 10 or newer) on the worker PC. Without it
+the tool still works, with project types only. The first call on a project takes about 15 s longer to build the
+index. Scratch copies of the last 20 calls are kept in `...\code\<project>\runs\`.
+
 ### Usage stats
 
 Every token the model reads is one Claude did not, so the client logs each `local_llm_ask` itself, at no cost to Claude:

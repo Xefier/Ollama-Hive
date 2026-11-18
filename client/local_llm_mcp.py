@@ -13,6 +13,10 @@ Environment:
   LOCAL_LLM_STATS   The usage log, one JSON line per call. Default %LOCALAPPDATA%\local-llm\stats.jsonl
                     (~/.local-llm/stats.jsonl where LOCALAPPDATA is not set).
   LOCAL_LLM_INFLIGHT  The folder of in-flight markers that balance the rigs. Default %LOCALAPPDATA%\local-llm\inflight.
+  LOCAL_LLM_PARALLEL  Tries local_llm_code sends at once: set it to the rigs' num_parallel. Default 3.
+
+local_llm_code (code_pipeline.py, code_index.py, code_compile.py and apidump/ beside this file) keeps its index of a
+project's types and its scratch copies under %LOCALAPPDATA%\local-llm\code\<project>.
 
 Run directly with --stats [days] [--json] it prints the usage summary instead of serving, and with
 --calibrate <percent_used> [--reset <ISO> | --since <ISO>] [--json] it prices this PC's Claude Code usage (from the
@@ -47,6 +51,8 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 CHARS_PER_TOKEN = 3.0
 RESERVED_ANSWER_TOKENS = 2048
 STATS_DAYS = 14
+# Tries local_llm_code sends at once when LOCAL_LLM_PARALLEL is not set: the rigs' num_parallel today
+DEFAULT_PARALLEL = 3
 
 # USD per million tokens (input, output, cache read, cache write 5m): API list prices as of 2026-11-01, used only as a
 # weighting to turn mixed-model token counts into one number for calibrating the subscription's weekly percent; the
@@ -91,6 +97,40 @@ TOOLS = [
                 "max_tokens": {"type": "integer", "description": "Longest answer allowed. Default: no limit set."},
             },
             "required": ["prompt"],
+        },
+    },
+    {
+        "name": "local_llm_code",
+        "description": (
+            "Has the local model write a C# change for a Unity project and compile-checks it. Give the change request "
+            "(self-contained: what is wrong, what should happen, which mechanism to use if you know it), the files it "
+            "applies to and the project root. The declarations the change can call (the project's types, Unity, "
+            "Fusion and package APIs) are attached for the model, several tries are compiled offline as the whole "
+            "assembly, and the first that compiles comes back as a diff with a report. Nothing in the project is "
+            "written: apply the diff yourself. Compiling shows the names exist, not that the change is right: review "
+            "it. Takes 1 to 10 minutes. Needs a project the Unity editor has compiled once."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "request": {"type": "string", "description": "The change to make, with everything the model needs to know."},
+                "files": {
+                    "type": "array",
+                    "description": (
+                        "The files the change applies to, all in one assembly: a path (absolute, or relative to the "
+                        "project) for a whole or a new file, or {\"path\", \"lines\": \"120-180, 300-340\"} to send "
+                        "only those line ranges of a long file (whole methods) and get them back changed."),
+                    "items": {"anyOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {"path": {"type": "string"}, "lines": {"type": "string"}},
+                         "required": ["path"]}]},
+                },
+                "project": {"type": "string", "description": "The Unity project root (the folder with Assets and Library)."},
+                "tries": {"type": "integer", "description": "Tries sent at once. Default: LOCAL_LLM_PARALLEL, else 3."},
+                "system": {"type": "string", "description": "A system prompt to use instead of the default (house rules)."},
+                "think": {"type": "boolean", "description": "Let the model reason first. Default true."},
+            },
+            "required": ["request", "files", "project"],
         },
     },
     {
@@ -374,20 +414,17 @@ def status(_arguments):
     return "\n".join(lines) or "OLLAMA_URLS lists no rig."
 
 
-def ask(arguments):
-    prompt = arguments.get("prompt")
-    if not prompt:
-        raise ToolError("prompt is required")
+def send(messages, think=False, max_tokens=None, empty_ok=False, file_bytes=0, files=0):
+    """Sends one chat request to the least busy rig that can hold it, failing over to the others, and logs it.
+    Returns {"answer", "url", "model", "prompt_tokens", "answer_tokens", "eval_seconds", "cut_off", "done_reason",
+    "failures"}. An empty answer counts as that rig failing, unless empty_ok: then it is returned for the caller to
+    judge (local_llm_code retries one with thinking off instead of on another rig's model)."""
     started = time.time()
-    files = arguments.get("files") or []
-    content = build_prompt(prompt, files)
-    think = bool(arguments.get("think", False))
-    file_bytes = files_size(files)
-    estimate = int(len(content) / CHARS_PER_TOKEN)
+    estimate = int(sum(len(message.get("content") or "") for message in messages) / CHARS_PER_TOKEN)
 
     def new_record(url=None, model=None):
         return {"rig": url, "model": model, "prompt_tokens": 0, "answer_tokens": 0, "file_bytes": file_bytes,
-                "files": len(files), "think": think, "cut_off": False, "saved_tokens": 0}
+                "files": files, "think": think, "cut_off": False, "saved_tokens": 0}
 
     try:
         candidates, marker = choose_rigs(estimate)
@@ -399,11 +436,6 @@ def ask(arguments):
         log_call(dict(new_record(), seconds=round(time.time() - started, 1), error=True))
         raise
 
-    messages = []
-    if arguments.get("system"):
-        messages.append({"role": "system", "content": arguments["system"]})
-    messages.append({"role": "user", "content": content})
-
     # One stats line per attempt: a failed rig's line has error: true, so per-rig stats show its failures
     failures = []
     try:
@@ -413,8 +445,8 @@ def ask(arguments):
             record = new_record(url, name)
             # No num_ctx here: a different value than the rig's own would make Ollama reload the model
             payload = {"model": name, "messages": messages, "stream": False, "think": think, "keep_alive": -1}
-            if arguments.get("max_tokens"):
-                payload["options"] = {"num_predict": int(arguments["max_tokens"])}
+            if max_tokens:
+                payload["options"] = {"num_predict": int(max_tokens)}
             if marker is None:
                 marker = add_marker(url)
             try:
@@ -432,7 +464,7 @@ def ask(arguments):
                 record["cut_off"] = reply.get("done_reason") == "length"
                 record["eval_seconds"] = round((reply.get("eval_duration") or 0) / 1e9, 2)
                 answer = (reply.get("message") or {}).get("content", "")
-                if not answer.strip():
+                if not answer.strip() and not empty_ok:
                     problem = "empty answer (done_reason: {})".format(reply.get("done_reason"))
             record["seconds"] = round(time.time() - attempt, 1)
             if problem:
@@ -441,20 +473,54 @@ def ask(arguments):
                 failures.append("{} on {}: {}".format(name, url, problem))
                 continue
             log_call(record)
-
-            produced = reply.get("eval_count") or 0
-            rate = "{:.0f} tokens/s".format(produced / record["eval_seconds"]) if record["eval_seconds"] > 0 \
-                else "unknown speed"
-            note = "\n\n[{} on {}: {} prompt tokens, {} answer tokens, {}".format(
-                name, url, reply.get("prompt_eval_count", "?"), produced, rate)
-            if record["cut_off"]:
-                note += ", CUT OFF at the token limit"
-            if failures:
-                note += "; answered after {} failed: {}".format(len(failures), "; ".join(failures))
-            return answer + note + "]"
+            return {"answer": answer, "url": url, "model": name, "prompt_tokens": reply.get("prompt_eval_count"),
+                    "answer_tokens": reply.get("eval_count") or 0, "eval_seconds": record["eval_seconds"],
+                    "cut_off": record["cut_off"], "done_reason": reply.get("done_reason"), "failures": failures}
     finally:
         remove_marker(marker)
     raise ToolError("Every rig that could take the request failed: " + "; ".join(failures))
+
+
+def ask(arguments):
+    prompt = arguments.get("prompt")
+    if not prompt:
+        raise ToolError("prompt is required")
+    files = arguments.get("files") or []
+    content = build_prompt(prompt, files)
+    messages = []
+    if arguments.get("system"):
+        messages.append({"role": "system", "content": arguments["system"]})
+    messages.append({"role": "user", "content": content})
+    reply = send(messages, think=bool(arguments.get("think", False)), max_tokens=arguments.get("max_tokens"),
+                 file_bytes=files_size(files), files=len(files))
+
+    produced = reply["answer_tokens"]
+    rate = "{:.0f} tokens/s".format(produced / reply["eval_seconds"]) if reply["eval_seconds"] > 0 else "unknown speed"
+    note = "\n\n[{} on {}: {} prompt tokens, {} answer tokens, {}".format(
+        reply["model"], reply["url"], "?" if reply["prompt_tokens"] is None else reply["prompt_tokens"], produced, rate)
+    if reply["cut_off"]:
+        note += ", CUT OFF at the token limit"
+    if reply["failures"]:
+        note += "; answered after {} failed: {}".format(len(reply["failures"]), "; ".join(reply["failures"]))
+    return reply["answer"] + note + "]"
+
+
+def default_tries():
+    """How many tries local_llm_code sends at once: LOCAL_LLM_PARALLEL, which should be the rigs' num_parallel."""
+    try:
+        return max(1, int(os.environ.get("LOCAL_LLM_PARALLEL") or DEFAULT_PARALLEL))
+    except ValueError:
+        return DEFAULT_PARALLEL
+
+
+def code(arguments):
+    # Imported here so that the other tools work when the pipeline's files are not beside this one
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import code_pipeline
+    try:
+        return code_pipeline.tool(arguments, send, data_folder(), roots(), default_tries())
+    except (code_pipeline.PipelineError, code_pipeline.code_compile.CompileError) as error:
+        raise ToolError(str(error))
 
 
 def row_id(*parts):
@@ -725,7 +791,7 @@ def calibrate(percent_used, since=None, reset=None):
     }
 
 
-HANDLERS = {"local_llm_status": status, "local_llm_ask": ask, "local_llm_stats": stats}
+HANDLERS = {"local_llm_status": status, "local_llm_ask": ask, "local_llm_code": code, "local_llm_stats": stats}
 
 
 def handle(message):
