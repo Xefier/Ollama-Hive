@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.18.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.19.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -307,7 +307,7 @@ step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's 
 the miner log has the link). Open it from any rig, on any device on the LAN: it asks every rig that rig has heard in the last week and draws
 them together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
 the size of the dataset, how long the latest stretch of training took (or has been going), and when each rig was
-training, waiting or away. A rig that serves or makes a model says so, with the step of the export it is on and a progress bar for the whole of it, and
+training, waiting or away. A rig that serves says which model its Ollama has loaded and with how much context, and warns when not all of it is on the GPU: the rest then runs on the CPU, far slower, because the model and its context don't fit the card together. The Hive dashboard says the same beside the miner (`ollama ready, only 72% on GPU`), and the miner log when the model loads. A rig that serves or makes a model says so, with the step of the export it is on and a progress bar for the whole of it, and
 shows its GPU memory and miner log like the others; with no training anywhere the page is only that. **Do the rigs hold each other up?** A step
 ends when every rig has done its part, so a rig that is done early stands still until the slowest is. The page shows,
 per rig, how its step time divides between computing, waiting for the other rigs, and exchanging the gradients over

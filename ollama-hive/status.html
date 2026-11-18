@@ -161,7 +161,7 @@ function addRigs(addresses) {
 }
 
 // Everything but the rigs and the log is about a training run: left out while no rig trains and none has
-for (const part of document.querySelectorAll("#tiles, .card:not(#log-card)")) part.classList.add("training-only");
+for (const part of document.querySelectorAll("#tiles, .card:not(#log-card), main > details")) part.classList.add("training-only");
 
 function lasting(seconds) {
   const minutes = Math.round(seconds / 60);
@@ -548,8 +548,16 @@ function render() {
     // mode: the flight sheet's. A rig that serves or exports is no part of the training, and says so.
     const doing = rig.status && rig.status.mode && rig.status.mode !== "train" ? `${rig.status.mode === "export" ? "making a model, then serving it" : "serving"}: ` : "";
     const making = rig.status && rig.status.export;
+    // What the rig's Ollama has loaded. Not all of it on the GPU means part of it runs on the CPU, far slower.
+    const serving = ((rig.status && rig.status.models) || []).map(model => {
+      const share = model.size ? Math.floor(100 * model.on_gpu / model.size) : 100;
+      return `<br>${escaped(model.name)} is loaded${model.context ? `, with ${number(model.context)} tokens of context a request` : ""}`
+        + (share < 100 ? `<br><span class="problem">${levelMark(LEVELS[1], `Only ${share}% of it is on the GPU`)}<br>The rest runs on the CPU, which makes every answer far slower. `
+          + `It and its context don't fit this card's memory together: lower num_ctx or num_parallel, or set kv_cache_type=q8_0.</span>` : "");
+    }).join("");
     const text = (!rig.status ? "Not answering: rented, off, or on another flight sheet"
       : `${doing}${escaped(state || "starting")}${withProgress(rig.status.status)}`)
+      + serving
       + (making ? `<br>Making a model beside it (export-run): ${escaped(making.state)}${withProgress(making.status)}` : "")
       + (problem ? `<br><span class="problem">${levelMark(LEVELS[0], `Not training: failed ${problem.failures > 1 ? problem.failures + " times in a row" : "to start"}, last at ${fullTime(problem.at)}`)}<br>${escaped(problem.error)}</span>` : "")
       + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "")

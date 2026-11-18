@@ -17,7 +17,12 @@ if [[ $OH_MODE == train ]]; then
     oh_algo="qlora ${oh_state:-stopped} $(cat "$OH_RUN_DIR/train-status" 2>/dev/null)"
     oh_algo=${oh_algo% }
 else
-    oh_loaded=$(curl -fs --max-time 2 "$OH_API/api/ps" 2>/dev/null | jq -r '.models | length' 2>/dev/null)
+    oh_ps=$(curl -fs --max-time 2 "$OH_API/api/ps" 2>/dev/null)
+    oh_loaded=$(jq -r '.models | length' 2>/dev/null <<< "$oh_ps")
+    # A model that isn't all on the GPU runs partly on the CPU, far slower: said where the dashboard shows it, for as
+    # long as it is so. The miner log and the progress page say what to change.
+    oh_on_gpu=$(jq -r '.models[0] | if (.size // 0) > 0 then (.size_vram * 100 / .size | floor) else 100 end' 2>/dev/null <<< "$oh_ps")
+    [[ $oh_on_gpu =~ ^[0-9]+$ && $oh_on_gpu -lt 100 ]] && oh_algo="$oh_algo, only $oh_on_gpu% on GPU"
 fi
 
 oh_temp='[]'

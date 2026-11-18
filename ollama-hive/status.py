@@ -28,6 +28,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.request
 
 import problem
 
@@ -69,7 +70,7 @@ LOOK_EVERY = 3            # seconds between looks at the GPUs
 FULLEST_FOR = 30 * 60     # how long the look with the most of this miner on the GPUs is kept
 # The latest look at the GPUs, and the one where this miner held the most memory: an attempt that fails is gone from
 # the GPU within seconds, and what it looked like at its fullest is what says why
-looks = {"now": {"at": 0, "gpus": [], "processes": [], "memory": []}, "fullest": None}
+looks = {"now": {"at": 0, "gpus": [], "processes": [], "memory": [], "models": []}, "fullest": None}
 
 
 def nvidia_smi(query, fields):
@@ -90,11 +91,25 @@ def command_of(pid, otherwise):
         return otherwise
 
 
-def look(memory_file):
+def models_served(ollama):
+    """What this rig's Ollama has loaded: the name, the context each request gets, the bytes it takes and how many of
+    them are on the GPU. A model that isn't all there runs partly on the CPU, far slower, which nothing else shows."""
+    if not ollama:
+        return []
+    try:
+        with urllib.request.urlopen(ollama + "/api/ps", timeout=3) as answer:
+            loaded = json.load(answer).get("models") or []
+        return [{"name": model.get("name"), "context": model.get("context_length"), "size": model.get("size"),
+                 "on_gpu": model.get("size_vram")} for model in loaded]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def look(memory_file, ollama):
     """gpus: a line per GPU as nvidia-smi gives it (name, MiB used, MiB in all, % busy, degrees, watts, id).
     processes: those computing on them: which GPU, the process, its MiB, what it is, and whether this miner runs
     it. The display server and the like hold GPU memory without being listed, so the processes need not add up.
-    memory: what this miner's workers say theirs goes to."""
+    memory: what this miner's workers say theirs goes to. models: see models_served."""
     cards = nvidia_smi("gpu", GPU_FIELDS)
     ids = [gpu[-1] for gpu in cards]
     processes = []
@@ -103,16 +118,17 @@ def look(memory_file):
         processes.append({"gpu": ids.index(gpu) if gpu in ids else 0, "pid": pid,
                           "mib": int(used) if used.isdigit() else None,
                           "command": command[:300], "ours": OURS in command})
-    return {"at": round(time.time()), "gpus": cards, "processes": processes, "memory": memory_reports(memory_file)}
+    return {"at": round(time.time()), "gpus": cards, "processes": processes, "memory": memory_reports(memory_file),
+            "models": models_served(ollama)}
 
 
 def ours_in(seen):
     return sum(process["mib"] or 0 for process in seen["processes"] if process["ours"])
 
 
-def keep_looking(memory_file):
+def keep_looking(memory_file, ollama):
     while True:
-        seen = looks["now"] = look(memory_file)
+        seen = looks["now"] = look(memory_file, ollama)
         fullest = looks["fullest"]
         if ours_in(seen) and (not fullest or ours_in(seen) >= ours_in(fullest) or seen["at"] - fullest["at"] > FULLEST_FOR):
             looks["fullest"] = seen
@@ -181,6 +197,7 @@ def main():
     parser.add_argument("--problem-file", default="")
     parser.add_argument("--memory-file", default="")
     parser.add_argument("--full-base", default="")
+    parser.add_argument("--ollama", default="", help="http://address:port of this rig's Ollama, on a flight sheet that serves")
     parser.add_argument("--mode", default="train", help="the flight sheet's: train, serve or export")
     parser.add_argument("--export-files", default="", help="export-run.sh's state and status files, less -state and -status")
     args = parser.parse_args()
@@ -213,7 +230,7 @@ def main():
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
                                 "state": read_line(args.state_file), "status": read_line(args.status_file),
                                 "problem": problem.read(args.problem_file), "gpus": seen["gpus"], "processes": seen["processes"],
-                                "memory": seen["memory"], "fullest": looks["fullest"],
+                                "memory": seen["memory"], "fullest": looks["fullest"], "models": seen["models"],
                                 "log": bool(args.log_file)})
             elif url.path == "/history":
                 query = urllib.parse.parse_qs(url.query)
@@ -247,7 +264,7 @@ def main():
         def log_message(self, *_):
             pass  # a request every few seconds per open page would fill the miner log
 
-    threading.Thread(target=keep_looking, args=(args.memory_file,), daemon=True).start()
+    threading.Thread(target=keep_looking, args=(args.memory_file, args.ollama), daemon=True).start()
     http.server.ThreadingHTTPServer.daemon_threads = True
     try:
         server = http.server.ThreadingHTTPServer((args.me, args.port), Handler)
