@@ -6,8 +6,8 @@ the run for theirs and draws them together, so it works with whichever rigs are 
 rented doesn't answer and shows as away.
 
   /          the page
-  /status    what this rig is doing now, what stops it if something does (problem.py), its GPUs, and the addresses
-             of the rigs of the run that it has heard (meet.py)
+  /status    what this rig is doing now, what stops it if something does (problem.py), its GPUs and what is using
+             their memory, and the addresses of the rigs of the run that it has heard (meet.py)
   /history   the lines train.py wrote since byte ?from=, for a page that keeps asking
   /log       the end of the miner log, for finding out from another PC why a rig isn't training
 
@@ -15,6 +15,7 @@ Read-only, and anything that can reach the port can read it. Standard library on
 """
 
 import argparse
+import glob
 import http.server
 import json
 import os
@@ -55,21 +56,58 @@ def end_of(path, length):
         return b""
 
 
-GPU_FIELDS = "name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw"
-gpus_asked = [0, []]  # when, and the answer: several pages open don't each start nvidia-smi
+GPU_FIELDS = "name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw,uuid"
+PROCESS_FIELDS = "gpu_uuid,pid,used_memory,process_name"
+OURS = "ollama-hive"  # in the command line of everything this miner runs: its folder, and its data folder
+gpus_asked = [0, [], []]  # when, and the answers: several pages open don't each start nvidia-smi
+
+
+def nvidia_smi(query, fields):
+    try:
+        answer = subprocess.run(["nvidia-smi", f"--query-{query}={fields}", "--format=csv,noheader,nounits"],
+                                capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [[field.strip() for field in line.split(",", fields.count(","))] for line in answer.splitlines() if line.strip()]
+
+
+def command_of(pid, otherwise):
+    """The command line of a process, which says more than the program's name: every Python script is python."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return handle.read().replace(b"\0", b" ").decode("utf-8", "replace").strip() or otherwise
+    except OSError:
+        return otherwise
 
 
 def gpus():
-    """A line per GPU as nvidia-smi gives it: name, MiB used, MiB in all, % busy, degrees, watts."""
+    """A line per GPU as nvidia-smi gives it (name, MiB used, MiB in all, % busy, degrees, watts, id), and the
+    processes computing on them: which GPU, the process, its MiB, what it is, and whether this miner runs it. The
+    display server and the like hold GPU memory without being listed, so the processes need not add up."""
     if time.time() - gpus_asked[0] > 5:
-        try:
-            answer = subprocess.run(["nvidia-smi", f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"],
-                                    capture_output=True, text=True, timeout=10).stdout
-            gpus_asked[1] = [[field.strip() for field in line.split(",")] for line in answer.splitlines() if line.strip()]
-        except (OSError, subprocess.SubprocessError):
-            gpus_asked[1] = []
+        gpus_asked[1] = nvidia_smi("gpu", GPU_FIELDS)
+        ids = [gpu[-1] for gpu in gpus_asked[1]]
+        processes = []
+        for gpu, pid, used, name in (row for row in nvidia_smi("compute-apps", PROCESS_FIELDS) if len(row) == 4):
+            command = command_of(pid, name)
+            processes.append({"gpu": ids.index(gpu) if gpu in ids else 0, "pid": pid,
+                              "mib": int(used) if used.isdigit() else None,
+                              "command": command[:300], "ours": OURS in command})
+        gpus_asked[2] = processes
         gpus_asked[0] = time.time()
-    return gpus_asked[1]
+    return gpus_asked[1], gpus_asked[2]
+
+
+def memory_reports(prefix):
+    """What each of this rig's training workers says its GPU memory goes to (train.py), by process."""
+    reports = []
+    for path in glob.glob(glob.escape(prefix) + "-*") if prefix else []:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                reports.append(json.load(handle))
+        except (OSError, ValueError):
+            pass
+    return reports
 
 
 def history_since(path, start):
@@ -102,6 +140,7 @@ def main():
     parser.add_argument("--status-file", required=True)
     parser.add_argument("--log-file", default="")
     parser.add_argument("--problem-file", default="")
+    parser.add_argument("--memory-file", default="")
     args = parser.parse_args()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -124,10 +163,12 @@ def main():
                 with open(os.path.join(HERE, "status.html"), "rb") as handle:
                     self.send(handle.read(), "text/html; charset=utf-8")
             elif url.path == "/status":
+                cards, processes = gpus()
                 self.send_json({"address": args.me, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
                                 "state": read_line(args.state_file), "status": read_line(args.status_file),
-                                "problem": problem.read(args.problem_file), "gpus": gpus(),
+                                "problem": problem.read(args.problem_file), "gpus": cards, "processes": processes,
+                                "memory": memory_reports(args.memory_file),
                                 "log": bool(args.log_file)})
             elif url.path == "/history":
                 query = urllib.parse.parse_qs(url.query)

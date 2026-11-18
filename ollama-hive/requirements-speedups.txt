@@ -1,0 +1,5 @@
+# Optional, installed with speedups=1: faster code for parts of some models, which work without it too.
+# flash-linear-attention: the Gated DeltaNet layers of Qwen3.5/3.8 (three of every four layers), which otherwise run
+# on plain PyTorch code that the model's library calls "correct but much slower".
+# causal-conv1d, which the same library also asks for, is left out: it only installs where a CUDA compiler is.
+flash-linear-attention==0.6.0

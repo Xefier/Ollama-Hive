@@ -11,6 +11,8 @@
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series: #2a78d6; --idle: #c3c2b7;
   --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  /* What a training worker's GPU memory goes to */
+  --part-model: #2a78d6; --part-trained: #12b5cb; --part-example: #35a36b; --part-rest: #9db8dd;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -36,6 +38,10 @@ h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .dot.on { background: var(--series); }
 .dot.off { background: none; border: 1px solid var(--muted); }
 .dot.bad { background: var(--critical); }
+.memory { display: flex; height: 10px; margin: 4px 0 2px; border: 1px solid var(--axis); border-radius: 3px; overflow: hidden; gap: 1px; }
+.memory i { min-width: 2px; }
+.key { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+.key.free { border: 1px solid var(--axis); }
 .rig.bad { border-color: var(--critical); }
 .rig .problem { color: var(--ink); }
 .rig button, .card button { font: inherit; color: var(--series); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
@@ -175,10 +181,42 @@ $("rigs").onclick = event => {
   if (address) { logOf = address; showLog().then(() => $("log-card").scrollIntoView({ behavior: "smooth", block: "nearest" })); }
 };
 
-// What a rig's GPUs are doing, from nvidia-smi: name, MiB used, MiB in all, % busy, degrees, watts
+// What a rig's GPUs are doing, from nvidia-smi (name, MiB used, MiB in all, % busy, degrees, watts), and what holds
+// their memory: this miner's processes, every other process by name, and what no process is listed for
 function gpuLines(status) {
-  return (status.gpus || []).map(([name, used, total, busy, degrees, watts]) =>
-    `<br>${escaped(name.replace(/^NVIDIA (GeForce )?/, ""))}: ${(used / 1024).toFixed(1)} of ${(total / 1024).toFixed(1)} GB in use · ${busy}% busy · ${degrees}°C · ${Math.round(watts)} W`).join("");
+  const gb = mib => `${(mib / 1024).toFixed(1)} GB`;
+  // The program and what it runs, without the folders: enough to tell what a process is
+  const short = command => command.split(" ").slice(0, 3).map(word => word.split("/").pop()).join(" ");
+  return (status.gpus || []).map(([name, used, total, busy, degrees, watts], index) => {
+    const here = (status.processes || []).filter(process => process.gpu === index && process.mib);
+    const ours = here.filter(process => process.ours), others = here.filter(process => !process.ours);
+    const sum = list => list.reduce((mib, process) => mib + process.mib, 0);
+    const unlisted = Math.max(0, used - sum(here)), free = Math.max(0, total - used);
+    const part = (mib, color) => mib > 0 ? `<i style="flex:${mib};background:${color}"></i>` : "";
+    // A training worker says what its memory goes to (bytes): the parts of its share of the bar, in its colours
+    const split = process => {
+      const report = (status.memory || []).find(report => String(report.pid) === String(process.pid));
+      if (!report) return [{ mib: process.mib, color: "var(--series)", text: `this miner: ${escaped(short(process.command))}` }];
+      const mib = bytes => (bytes || 0) / 2 ** 20;
+      const model = Math.min(process.mib, mib(report.model));
+      const trained = Math.min(process.mib - model, mib(report.adapter) + mib(report.optimizer));
+      const example = Math.min(process.mib - model - trained, mib(report.example));
+      return [
+        { mib: model, color: "var(--part-model)", text: "the model itself" },
+        { mib: trained, color: "var(--part-trained)", text: "the adapter being trained and its optimizer" },
+        { mib: example, color: "var(--part-example)", text: `training an example, at most${report.tokens ? ` (the longest of the last step: ${number(report.tokens)} tokens)` : ""}` },
+        { mib: process.mib - model - trained - example, color: "var(--part-rest)", text: "PyTorch and the GPU driver, and memory kept ready for the next example" },
+      ].filter(piece => piece.mib >= 1);
+    };
+    const pieces = ours.flatMap(split);
+    const line = (color, text) => `<i class="key ${color ? "" : "free"}" style="${color ? `background:${color}` : ""}"></i>${text}`;
+    return `<br>${escaped(name.replace(/^NVIDIA (GeForce )?/, ""))}: ${gb(used)} of ${gb(total)} in use · ${busy}% busy · ${degrees}°C · ${Math.round(watts)} W
+      <div class="memory" title="GPU memory">${pieces.map(piece => part(piece.mib, piece.color)).join("")}${others.map(process => part(process.mib, "var(--warning)")).join("")}${part(unlisted, "var(--idle)")}${part(free, "transparent")}</div>`
+      + [...pieces.map(piece => line(piece.color, `${gb(piece.mib)} ${piece.text}`)),
+         ...others.map(process => line("var(--warning)", `${gb(process.mib)} something else: <span title="${escaped(process.command)}">${escaped(short(process.command))}</span> (process ${escaped(process.pid)})`)),
+         ...(unlisted > 64 ? [line("var(--idle)", `${gb(unlisted)} not listed by process (the display, or programs in a container)`)] : []),
+         line("", `${gb(free)} free`)].join("<br>");
+  }).join("");
 }
 
 async function askRig(address, rig) {

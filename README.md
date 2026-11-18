@@ -211,6 +211,7 @@ on with whichever rigs are on this flight sheet, down to one, and pauses only wh
 | `step_size` | `8` | Examples per step, shared between the rigs training at that moment by their speed: one alone does all 8. A higher value gives more to balance with, and less network traffic per example. It replaces `grad_accum`, and a run started with that needs a new `run_name` |
 | `save_steps` | `25` | Steps between checkpoints. A stop saves too, so this only matters for a crash or a power cut |
 | `train_port` | `29400` | Port the rigs meet on. The firewall rules guard this port in train mode |
+| `speedups` | `0` | `1`: install and use optional faster code for parts of some models, see below |
 | `torch_index` | `cu128` | PyTorch wheel index. `cu128` needs NVIDIA driver 570 or newer (an RTX 5090 needs it anyway) |
 
 `gpus`, `allow`, `bind`, `data_dir`, `reset_oc` and `allow_docker` work as when serving. `gpus` defaults to `0` here:
@@ -282,6 +283,15 @@ they are left out. A length that the growth so far says would not fit is not tri
 
 **GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 128 at a time; the loss and its gradients are the same. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
 
+**`speedups=1`.** Three of every four layers of Qwen3.5/3.8 are of a kind (Gated DeltaNet) that the model's library
+runs on plain PyTorch code it calls "correct but much slower" unless the `flash-linear-attention` package is there.
+With `speedups=1` the miner installs it (`requirements-speedups.txt`), and every start tries it out on the GPU
+before the model is loaded: its fast code is compiled on the rig the first time, and if that fails, or the package
+didn't install, the rig trains without it and the miner log says why. The rigs of a run don't all have to have it.
+With `max_len=auto` a rig measures its limit again when this changes. Off by default because it has not run on a
+GPU here yet: turn it on once a rig trains, and compare the seconds per step on the progress page. The other package
+the library asks for, `causal-conv1d`, is not installed: it needs a CUDA compiler on the rig.
+
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
 
@@ -301,7 +311,12 @@ of the history is missing until it is back; with every rig rented there is no pa
 
 **When a rig isn't training,** the page says so on that rig, in red, with what went wrong on its last attempt and
 how many attempts have failed in a row; it goes away once the rig trains again. Every rig also shows what its GPUs
-are doing (memory in use, load, temperature, power), and has a **Miner log** button that shows the end of that rig's
+are doing (load, temperature, power) with a bar of their memory: what this miner holds, what every other process
+holds, by name and process number, what is in use without a process being listed for it (the display, or programs
+in a container), and what is free. The miner's own part is split by what it goes to: the model itself, the adapter being trained with
+its optimizer, the most that training an example took in the last step (with that example's length), and the rest
+(PyTorch, the driver, memory kept ready). That is where to see whether something else is taking memory the training
+could have. It has a **Miner log** button that shows the end of that rig's
 miner log on the page (`http://<rig>:29410/log` gives the same as text), so the reason can be read without logging
 in to the rig. The log starts every attempt with the versions of PyTorch and the training packages and the GPU's
 free memory. The page is read-only, and like the training
@@ -426,6 +441,7 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 - `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
 - `train.py`: one worker of the QLoRA run
 - `status.py`, `status.html`: the progress page of a run, and the rig's part of its data
+- `requirements-speedups.txt`: the optional packages of `speedups=1`
 - `problem.py`: what stopped a rig's last attempts at training, kept between attempts for the progress page
 - `requirements-train.txt`: the Python packages of the training environment
 - `h-export.sh`: `mode=export`: makes an Ollama model of a run

@@ -88,6 +88,9 @@ def parse_args():
     parser.add_argument("--state-file")
     parser.add_argument("--status-file")
     parser.add_argument("--problem-file", help="where to say what went wrong, for the progress page")
+    parser.add_argument("--memory-file", help="where to say what the GPU memory goes to, for the progress page")
+    parser.add_argument("--speedups", action="store_true",
+                        help="use the optional faster code of requirements-speedups.txt where it is installed and works")
     parser.add_argument("--prepare", action="store_true",
                         help="download the base model and the dataset if it is there, report on it, then exit")
     return parser.parse_args()
@@ -405,9 +408,49 @@ def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say):
     return find_limit(peak_at, budget)
 
 
+speedups_in_use = []  # the names of the optional packages this worker uses
+
+
 def gpu_name(torch, device):
+    """What a measured limit holds for: this GPU, with or without the speed-ups, which use memory differently."""
     properties = torch.cuda.get_device_properties(device)
-    return f"{properties.name}, {properties.total_memory}"
+    return ", ".join([properties.name, str(properties.total_memory), *speedups_in_use])
+
+
+def set_up_speedups(torch, wanted, device, cuda):
+    """flash-linear-attention is used by the model's library whenever it can be imported, so this decides it before
+    the model is: tried out on the GPU when wanted, and put out of reach when not wanted or not working. Its fast
+    code is compiled on the rig the first time it runs, which is where it would fail."""
+    def put_out_of_reach():
+        for name in [name for name in sys.modules if name == "fla" or name.startswith("fla.")]:
+            del sys.modules[name]
+        sys.modules["fla"] = None
+
+    if not (wanted and cuda):
+        put_out_of_reach()
+        return
+    try:
+        import importlib.metadata
+
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+        query, key, value = (torch.randn(1, 128, 2, 16, device=device, requires_grad=True) for _ in range(3))
+        decay = -torch.rand(1, 128, 2, device=device)
+        beta = torch.rand(1, 128, 2, device=device)
+        result = chunk_gated_delta_rule(query, key, value, decay, beta)[0]
+        result.sum().backward()
+        if not (torch.isfinite(result).all() and torch.isfinite(query.grad).all()):
+            raise ValueError("its result is not a number")
+        speedups_in_use.append(f"flash-linear-attention {importlib.metadata.version('flash-linear-attention')}")
+        log(f"Speed-ups: {speedups_in_use[-1]} works here and is used")
+    except ImportError:
+        log("Speed-ups: flash-linear-attention is not installed (see the install further up): training without it")
+        put_out_of_reach()
+    except Exception as error:
+        traceback.print_exc()
+        log(f"Speed-ups: flash-linear-attention failed its try-out ({type(error).__name__}: {str(error)[:200]}): "
+            "training without it")
+        put_out_of_reach()
 
 
 def limit_path(args, local_rank):
@@ -658,6 +701,7 @@ def main(args):
         log(f"GPU {local_rank}: {torch.cuda.get_device_name(device)}, {free / 2 ** 30:.1f} of {total / 2 ** 30:.1f} GB free")
     else:
         log("No GPU that PyTorch can use: training on the CPU")
+    set_up_speedups(torch, args.speedups, device, cuda)
 
     # A stop (the flight sheet ending, or meet.py regrouping because a rig joined) is only noted here. The loop
     # passes it on to the other rigs and saves, between two examples.
@@ -702,7 +746,32 @@ def main(args):
     load_examples()
     if writer:
         write_line(args.state_file, "loading")
-    model = add_adapter(torch, load_model(torch, args, device, cuda), args)
+    # What the GPU memory goes to, for the progress page: read off as each part arrives
+    memory = {"pid": os.getpid()}
+
+    def in_use():
+        return torch.cuda.memory_allocated(device) if cuda else 0
+
+    def tell_memory(tokens=None):
+        """model: the base model. adapter: the weights being trained. optimizer: what Adam keeps per weight.
+        example: the most that training an example took on top of those, since the last call. kept: what PyTorch
+        holds on to for the next example without using it now."""
+        if not (cuda and args.memory_file):
+            return
+        memory["optimizer"] = sum(value.numel() * value.element_size() for state in optimizer.state.values()
+                                  for value in state.values() if torch.is_tensor(value))
+        steady = memory["model"] + memory["adapter"] + memory["optimizer"]
+        memory["example"] = max(0, torch.cuda.max_memory_allocated(device) - steady)
+        memory["kept"] = max(0, torch.cuda.memory_reserved(device) - max(in_use(), steady + memory["example"]))
+        memory["tokens"] = tokens
+        memory["at"] = round(time.time())
+        write_line(f"{args.memory_file}-{local_rank}", json.dumps(memory))
+        torch.cuda.reset_peak_memory_stats(device)
+
+    model = load_model(torch, args, device, cuda)
+    memory["model"] = in_use()
+    model = add_adapter(torch, model, args)
+    memory["adapter"] = in_use() - memory["model"]
     named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
     parameters = [p for _, p in named]
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=0.0)
@@ -727,7 +796,7 @@ def main(args):
     # What this rig can hold itself is its own limit, and limits has every rig's. Under auto no setting says how
     # long an example can be at all, so the run remembers the highest limit it has met: the examples over that are
     # no rig's to train, and don't count as left.
-    memory = args.gpu_gb if args.gpu_gb is not None else (
+    gpu_gb = args.gpu_gb if args.gpu_gb is not None else (
         round(torch.cuda.get_device_properties(device).total_memory / 2 ** 30) if cuda else 0)
     # Before any measuring: only a model that is training saves memory by recomputing its activations
     model.train()
@@ -747,10 +816,11 @@ def main(args):
         own_limit = own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer,
                                    loss_of, reserve)
     else:
-        own_limit = limit_for(parse_limits(args.max_len), memory)
+        own_limit = limit_for(parse_limits(args.max_len), gpu_gb)
     limits = [int(limit) for limit in share(dist, torch, device, rank, world, own_limit)]
     reach = max(limits)
     reached = max(reached, reach) if args.max_len == AUTO else top_limit
+    tell_memory()
     # A step is the same number of examples whoever is here, so the rigs present split it: alone, a rig does it all
     step_examples = args.step_size
     rigs = f"{world} rig{'s' * (world > 1)}"
@@ -920,6 +990,7 @@ def main(args):
                 counts[key] = counts.get(key, 0) + 1
             seen += len(batch)
             steps_done += 1
+            tell_memory(max(len(examples[key][0]) for key in mine) if mine else None)
             if steps_done == 1:
                 # It trains: whatever stopped earlier attempts is over
                 problem.clear(args.problem_file)
@@ -937,7 +1008,7 @@ def main(args):
         if writer:
             write_line(args.status_file, "out of GPU memory: lower max_len")
         lowered = lower_auto_limit(torch, args, device, local_rank, own_limit) if args.max_len == AUTO else None
-        sys.exit(f"Out of GPU memory with examples up to {own_limit} tokens on {memory} GB (max_len={args.max_len}): "
+        sys.exit(f"Out of GPU memory with examples up to {own_limit} tokens on {gpu_gb} GB (max_len={args.max_len}): "
                  + (f"taking {lowered} from the next start" if lowered else "lower the limit for this GPU, or lora_r"))
     except Exception:
         # Usually a rig that vanished mid-step. The adapter is still as the last whole step left it.

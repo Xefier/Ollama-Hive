@@ -57,6 +57,25 @@ install_train_env() {
     echo "$wanted" > "$stamp"
 }
 
+# speedups=1: the optional packages of requirements-speedups.txt. Training works without them, so a failed install
+# is said and nothing more. train.py tries them out before it relies on them.
+install_speedups() {
+    [[ $OH_SPEEDUPS == 1 ]] || return 0
+    local requirements="$OH_DIR/requirements-speedups.txt"
+    local stamp="$OH_VENV/.speedups"
+    local wanted
+    wanted=$(sha256sum < "$requirements")
+    [[ -f $stamp && $(< "$stamp") == "$wanted" ]] && return 0
+    install_uv || return 0
+    log "Installing the optional speed-ups (speedups=1)"
+    "$OH_UV" pip install --python "$OH_VENV/bin/python" -r "$requirements" >> "$LOG_FILE" 2>&1 &
+    if wait $!; then
+        echo "$wanted" > "$stamp"
+    else
+        log "The speed-ups did not install (see above): training without them"
+    fi
+}
+
 # Runs meet.py, which trains with whichever rigs are there, until something breaks
 train_once() {
     local address interface broadcast gpus workers
@@ -87,7 +106,9 @@ train_once() {
     local arguments=(--base "$OH_BASE" --dataset "$OH_DATASET" --run-dir "$OH_RUN_PATH"
         --epochs "$OH_EPOCHS" --max-len "$OH_MAX_LEN" --lora-r "$OH_LORA_R" --lr "$OH_LR"
         --step-size "$OH_STEP_SIZE" --save-steps "$OH_SAVE_STEPS"
-        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --problem-file "$OH_PROBLEM_FILE")
+        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --problem-file "$OH_PROBLEM_FILE"
+        --memory-file "$OH_MEMORY_FILE")
+    [[ $OH_SPEEDUPS == 1 ]] && arguments+=(--speedups)
 
     oh_set_state preparing
     log "Fetching $OH_BASE if it isn't on disk, and the dataset if it is there. Free space: $(df -h --output=avail "$OH_DATA_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')"
@@ -130,7 +151,7 @@ start_status_page() {
     "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
         --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" \
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --log-file "$LOG_FILE" \
-        --problem-file "$OH_PROBLEM_FILE" \
+        --problem-file "$OH_PROBLEM_FILE" --memory-file "$OH_MEMORY_FILE" \
         >> "$LOG_FILE" 2>&1 &
     log "Progress page: http://$address:$OH_STATUS_PORT/"
 }
@@ -139,8 +160,9 @@ start_status_page() {
 # continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
 train_loop() {
     local told=""
+    install_speedups
     # Left by an earlier time on this flight sheet
-    rm -f "$OH_PROBLEM_FILE"
+    rm -f "$OH_PROBLEM_FILE" "$OH_MEMORY_FILE"-*
     start_status_page
     while true; do
         oh_set_state starting

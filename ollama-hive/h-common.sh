@@ -45,6 +45,8 @@ OH_LR=2e-4
 OH_STEP_SIZE=8
 OH_SAVE_STEPS=25
 OH_TORCH_INDEX=cu128
+# 1: install and use the optional faster code of requirements-speedups.txt
+OH_SPEEDUPS=0
 # mode=export: the Ollama model made of a finished run. See h-export.sh.
 OH_FULL_BASE=""
 OH_EXPORT_NAME=""
@@ -63,6 +65,8 @@ OH_STATUS_PORT=$((OH_TRAIN_PORT + 10))
 OH_TRAIN_DIR="$OH_DATA_DIR/train"
 OH_VENV="$OH_TRAIN_DIR/venv"
 OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
+# What each training worker's GPU memory goes to, for the progress page: train.py adds -<GPU> and writes it
+OH_MEMORY_FILE="$OH_RUN_DIR/train-memory"
 # What stopped the training's last attempts, for the progress page: see problem.py
 OH_PROBLEM_FILE="$OH_RUN_DIR/train-problem"
 # The rigs of the run that this one has heard: meet.py keeps it, status.py reads it
