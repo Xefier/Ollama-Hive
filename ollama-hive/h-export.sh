@@ -154,6 +154,19 @@ fetch_adapter() {
     return 1
 }
 
+# For a rig that what the others say on the LAN doesn't reach (a firewall of its own, a network that carries no
+# broadcasts): asks the progress page of every address that shares this rig's first three numbers for the run's
+# adapter, all at once, and prints the ones that have it. Asking goes out, which such a rig can do.
+ask_for_training_rigs() {
+    local address
+    address=$(cat "$OH_RUN_DIR/address" 2>/dev/null)
+    [[ -n $address ]] || address=$(oh_lan_address)
+    [[ -n $address ]] || return 1
+    seq 1 254 | grep -vx "${address##*.}" |
+        xargs -P 64 -I{} sh -c 'curl -fs --connect-timeout 2 --max-time 5 "http://$0.{}:$1/adapter" 2>/dev/null | grep -qx "run $2" && echo "$0.{}"' \
+            "${address%.*}" "$OH_STATUS_PORT" "$OH_RUN_NAME" | sort -t . -k 4 -n
+}
+
 # The rigs training the run say so on the LAN every few seconds (meet.py): the adapter is taken from one of them, as
 # it stands now, so the rig that makes the model needs no copy of its own and no address in its flight sheet.
 # Without one to hear, the adapter already on this rig is the one.
@@ -162,7 +175,11 @@ fetch_adapter_from_training_rig() {
     python=$(plain_python) || return 1
     export_says "0% · listening for a rig that is training run $OH_RUN_NAME, for its adapter"
     rigs=$("$python" "$OH_DIR/meet.py" hear --run "$OH_RUN_NAME" --port "$OH_TRAIN_PORT" 2>> "$LOG_FILE")
-    [[ -n $rigs ]] || { log "No rig heard training run $OH_RUN_NAME just now"; return 1; }
+    if [[ -z $rigs ]]; then
+        log "No rig heard training run $OH_RUN_NAME: asking every address of this rig's network instead"
+        rigs=$(ask_for_training_rigs)
+        [[ -n $rigs ]] || { log "No rig of this network has an adapter of run $OH_RUN_NAME"; return 1; }
+    fi
     for rig in $rigs; do
         fetch_adapter "$rig" && return 0
     done

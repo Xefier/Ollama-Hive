@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.20.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.21.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -412,7 +412,8 @@ at the same quantization it takes the same VRAM and runs at the same speed. Only
 The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the first start the rig first listens a few seconds
 for the rigs that are training `run_name` (they say so on the LAN, which is also how they find each other) and fetches
 the adapter from one of them, as it stands at that moment. No address is needed and the training goes on. If none is
-heard, the adapter already in `<data_dir>/train/runs/<run_name>/adapter` on this rig is used: the rig's own if it
+heard (a rig whose firewall lets nothing of that in, a network without broadcasts), it asks the progress page of every
+address that shares its own first three numbers instead, which takes about ten seconds. If that finds none either, the adapter already in `<data_dir>/train/runs/<run_name>/adapter` on this rig is used: the rig's own if it
 trained, or a copy of that folder from a rig that did. Then it:
 
 1. downloads `full_base` one weights file at a time and adds the adapter to each (never more than one file in memory,
