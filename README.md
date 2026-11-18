@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.9.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.10.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -278,7 +278,7 @@ few minutes, the miner log has every length with its memory, and the result is k
 (`limit-0.json`), so later starts skip it. A rig that still runs out of memory in training lowers its own limit by a
 tenth and starts again. The progress page shows every rig's limit. Examples longer than any rig of the run has been
 able to take stay in the dataset untrained, and are trained once a rig that can take them joins; over 16384 tokens
-they are left out. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
+they are left out. A length that the growth so far says would not fit is not tried, so the GPU should not actually run out; if the measuring fails for another reason, the rig says why on the progress page and trains with 2048 until its next start. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
 
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
@@ -295,7 +295,14 @@ evenly: a higher `step_size` gives more examples to balance with, and a step wit
 others wait however it is shared. A large network share is where to see that the link between the rigs is worth
 upgrading. Both are measured: the rigs meet once at the end of every step. A rented rig doesn't answer and its part
 of the history is missing until it is back; with every rig rented there is no page. Each rig keeps its history in
-`<data_dir>/train/runs/<run_name>/history.jsonl`, one line per step. The page is read-only, and like the training
+`<data_dir>/train/runs/<run_name>/history.jsonl`, one line per step.
+
+**When a rig isn't training,** the page says so on that rig, in red, with what went wrong on its last attempt and
+how many attempts have failed in a row; it goes away once the rig trains again. Every rig also shows what its GPUs
+are doing (memory in use, load, temperature, power), and has a **Miner log** button that shows the end of that rig's
+miner log on the page (`http://<rig>:29410/log` gives the same as text), so the reason can be read without logging
+in to the rig. The log starts every attempt with the versions of PyTorch and the training packages and the GPU's
+free memory. The page is read-only, and like the training
 ports it is as open as the rig leaves it: anything on the LAN can read the run's progress.
 
 The loss only says how well the model predicts the examples it is being trained on. It can't tell whether an answer
@@ -326,6 +333,10 @@ No rig has to stay: the run pauses only while every rig is away.
   `train_port`, with the `run_name`), and joins the rigs it hears. Putting the flight sheet on another rig adds it to
   the run and taking it off removes it; nothing else has to change, and a rented rig is simply not heard. The rigs
   must be on one subnet, or reach each other through `peers`.
+- **A rig whose training keeps failing** (its GPU out of memory, a broken install) would take the others' workers
+  down at every attempt, since they all start again when one joins. After 3 failures in a row it sits out between
+  attempts, 30 s longer each time and 10 minutes at most, and the others train meanwhile. A rig that only stopped
+  because another one's worker went away is not counted as failing.
 - **Who is in charge:** nobody in particular. One rig hosts the meeting on `train_port` (the lowest address, when
   several start together); when it leaves, another takes over within about 10 seconds.
 - **Rigs that are never idle together** each continue from their own checkpoint. When two such rigs meet again, the
@@ -338,7 +349,8 @@ No rig has to stay: the run pauses only while every rig is away.
 broadcast, training together, one joining a run in progress, one stopped mid-run (the other went on at the same step), the hosting rig stopped (the other took over),
 waiting for a dataset that isn't there yet, taking up examples added during the run (on a rig that can't reach the
 source too), a rig with a lower `max_len` limit leaving the long examples to the other and waiting for it when alone,
-sharing a step by speed, and both ending up with identical adapters. Not yet run on the rigs: measuring a
+sharing a step by speed, a rig whose worker can't start being shown with its error and sitting out while the other
+trains, and both ending up with identical adapters. Not yet run on the rigs: measuring a
 GPU's limit for `max_len=auto` (only its search was tested, on made-up numbers), how evenly the work is shared between
 two real GPUs, the broadcast between
 real machines, the 4-bit load of a 27B model, memory use at
@@ -412,6 +424,7 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 - `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
 - `train.py`: one worker of the QLoRA run
 - `status.py`, `status.html`: the progress page of a run, and the rig's part of its data
+- `problem.py`: what stopped a rig's last attempts at training, kept between attempts for the progress page
 - `requirements-train.txt`: the Python packages of the training environment
 - `h-export.sh`: `mode=export`: makes an Ollama model of a run
 - `export.py`: merges the adapter into the base model's weights

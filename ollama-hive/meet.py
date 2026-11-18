@@ -29,6 +29,8 @@ import sys
 import threading
 import time
 
+import problem
+
 BEAT = 2            # seconds between a rig's messages to the host
 GONE_AFTER = 15     # a rig silent this long has left
 SETTLE = 12         # wait this long after a change for more changes, so rigs arriving together form one group
@@ -38,6 +40,9 @@ PORT_SPREAD = 8     # each group's workers meet on one of this many ports after 
 LISTEN = 5          # seconds a rig listens for a host before it hosts itself
 HEARD_FOR = 3 * BEAT        # a host not heard for this long isn't one to join
 FORGET = 7 * 24 * 3600      # a rig not heard for this long is no longer one of the run's rigs
+# A rig whose worker keeps failing takes the others' workers down with it at every attempt. From REST_FROM failures in
+# a row it sits out between attempts, REST_STEP seconds longer per failure and REST_MOST at most.
+REST_FROM, REST_STEP, REST_MOST = 3, 30, 600
 
 
 def log(text):
@@ -53,6 +58,15 @@ def ask(address, port, message, timeout=3):
         return json.loads(reply) if reply else None
     except (OSError, ValueError):
         return None
+
+
+def ending(code):
+    """What a worker's exit code says, for when the worker itself said nothing."""
+    if code >= 0:
+        return f"The worker ended with code {code}: see the miner log"
+    name = signal.Signals(-code).name if -code in signal.Signals._value2member_map_ else f"signal {-code}"
+    hint = ": the system may have run out of memory" if name == "SIGKILL" else ""
+    return f"The worker was ended by {name}{hint}: see the miner log"
 
 
 def by_address(address):
@@ -237,6 +251,7 @@ class Rig:
         self.running = None  # the number of the group the workers were started for
         self.failed = None
         self.stopping = False
+        self.rest_until = 0
 
     def stop_workers(self):
         for worker in self.workers:
@@ -291,11 +306,23 @@ class Rig:
             leaving = [address for address in self.radio.leavers() if address in self.members]
             if any(code not in (None, 0) for code in codes):
                 # Ended without finishing: the rest of this rig's workers go too, and the host is told
-                self.end_group(f"A worker ended with code {[code for code in codes if code][0]}")
+                code = [code for code in codes if code][0]
+                self.end_group(f"A worker ended with code {code}")
+                # 75 and 76 are train.py's for stopping because another rig's worker did, or went away. Anything
+                # else went wrong on this rig.
+                if code not in (75, 76):
+                    failures = problem.failed(self.args.problem_file, ending(code))
+                    if failures >= REST_FROM:
+                        rest = min(REST_MOST, REST_STEP * failures)
+                        self.rest_until = time.time() + rest
+                        log(f"Failed {failures} times in a row: sitting out for {rest} s, so the other rigs can train")
             elif leaving:
                 # The workers save at once, without finishing a step the leaving rig has dropped
                 self.end_group(f"{', '.join(leaving)} is stopping")
         return False
+
+    def resting(self):
+        return time.time() < self.rest_until
 
     def host_session(self):
         try:
@@ -314,6 +341,8 @@ class Rig:
                     host.failed(self.failed)
                 if self.follow(host.tick()):
                     return True
+                if self.resting():
+                    return False
                 lower = self.radio.host(lower_only=True)
                 if lower:
                     log(f"{lower} is hosting the run too: giving way to it")
@@ -336,6 +365,8 @@ class Rig:
                     answered = time.time()
                     if self.follow(reply.get("group")):
                         return True
+                    if self.resting():
+                        break
                 elif self.finished():
                     # The host finished too and closed the meeting
                     return True
@@ -360,6 +391,12 @@ class Rig:
         while not self.stopping and time.time() - self.radio.started < LISTEN:
             time.sleep(0.5)
         while not self.stopping:
+            if self.resting():
+                # As good as gone to the others, so they train without this rig meanwhile
+                self.radio.leaving = True
+                time.sleep(1)
+                continue
+            self.radio.leaving = False
             host = self.radio.host()
             finished = self.member_session(host) if host else self.host_session()
             if finished:
@@ -374,6 +411,7 @@ def main():
     parser.add_argument("--broadcast", default="255.255.255.255", help="broadcast address of this rig's LAN")
     parser.add_argument("--peers", default="", help="rigs to tell one by one as well, comma-separated")
     parser.add_argument("--rigs-file", required=True, help="where to keep the rigs heard, for status.py")
+    parser.add_argument("--problem-file", required=True, help="where failures are counted, for status.py")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--workers", type=int, default=1, help="GPUs this rig trains on")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the worker's command line")

@@ -42,7 +42,10 @@ import signal
 import sys
 import threading
 import time
+import traceback
 import urllib.request
+
+import problem
 
 VISION_OR_HEAD = re.compile(r"(^|\.)(visual|vision\w*|merger|multi_modal_projector|lm_head|mtp\w*)(\.|$)")
 CHUNK = 256 * 1024 * 1024
@@ -52,6 +55,12 @@ WARMUP_STEPS = 10
 # What a worker tells the others where they meet, before a step and after its examples; the highest wins
 NEW_DATA, STOP = 1, 2
 BUCKET = 32 * 1024 * 1024   # gradient values sent in one go
+# Exit codes meet.py knows: stopped for the group to change, and stopped because another rig's worker went away.
+# Neither is this rig failing.
+REGROUP, PEER_LOST = 75, 76
+# How the libraries under PyTorch say that the worker of another rig is gone
+PEER_LOST_SIGNS = ("connection closed by peer", "connection reset", "broken pipe", "socket timeout", "nccl",
+                   "distnetworkerror", "remote worker")
 AUTO = "auto"       # max_len: every rig measures its own limit
 AUTO_TOP = 16384    # the longest example a rig tries then, and the longest the run knows of
 AUTO_STRIDE = 1024  # tokens between the lengths tried
@@ -75,6 +84,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--state-file")
     parser.add_argument("--status-file")
+    parser.add_argument("--problem-file", help="where to say what went wrong, for the progress page")
     parser.add_argument("--prepare", action="store_true",
                         help="download the base model and the dataset if it is there, report on it, then exit")
     return parser.parse_args()
@@ -190,10 +200,14 @@ def longest(spec):
 def find_limit(peak_at, budget, top=AUTO_TOP, stride=AUTO_STRIDE):
     """The longest example that fits in budget bytes, given peak_at(length): the memory an example of that length
     takes, or None when it ran out. Goes up a stride at a time until one doesn't fit, then tries once in between,
-    where the growth so far says the budget is reached. 0 when not even the first length fits."""
+    where the growth so far says the budget is reached. A length that the growth so far says is over the budget is
+    not tried: running a GPU out of memory is what this is for avoiding. 0 when not even the first length fits."""
     fits = []
     over = None
     for length in range(stride, top + 1, stride):
+        if len(fits) > 1 and fits[-1][1] + (fits[-1][1] - fits[-2][1]) > budget:
+            over = length
+            break
         peak = peak_at(length)
         if peak is None or peak > budget:
             over = length
@@ -310,25 +324,30 @@ def sum_gradients(dist, torch, parameters):
         bucket = []
 
 
-def measure_limit(torch, model, parameters, device):
+def measure_limit(torch, model, tokenizer, parameters, device, say):
     """The longest example this GPU can train with the model as loaded: see find_limit. Nothing is learned from the
-    made-up examples."""
+    made-up examples. say: where to tell how it is going."""
     import gc
 
     torch.cuda.empty_cache()
     budget = torch.cuda.memory_allocated(device) + AUTO_USE * torch.cuda.mem_get_info(device)[0]
-    vocabulary = model.get_input_embeddings().num_embeddings
+    # An ordinary word over and over: memory goes by length, and a made-up token could be one the model reads as
+    # the place of an image
+    word = tokenizer(" the", add_special_tokens=False)["input_ids"][-1]
 
     def peak_at(length):
         torch.cuda.reset_peak_memory_stats(device)
         ids = loss = None
         try:
-            ids = torch.randint(0, vocabulary, (1, length), device=device)
+            ids = torch.full((1, length), word, device=device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss = model(input_ids=ids, labels=ids).loss
             loss.backward()
             peak = torch.cuda.max_memory_allocated(device)
-        except torch.OutOfMemoryError:
+        except RuntimeError as error:
+            # Not always as torch.OutOfMemoryError: the libraries under PyTorch have their own ways of saying it
+            if not isinstance(error, torch.OutOfMemoryError) and "memory" not in str(error).lower():
+                raise
             peak = None
         ids = loss = None
         for parameter in parameters:
@@ -336,52 +355,64 @@ def measure_limit(torch, model, parameters, device):
         # What the failed attempt held is only let go once its error is gone, hence after the except block
         gc.collect()
         torch.cuda.empty_cache()
-        log(f"  {length} tokens: " + ("out of memory" if peak is None else f"{peak / 2 ** 30:.1f} GB"))
+        say(f"measuring: {length} tokens " + ("ran out of memory" if peak is None else f"take {peak / 2 ** 30:.1f} GB"))
         return peak
 
-    log(f"Measuring the longest example this GPU can train: up to {budget / 2 ** 30:.1f} GB may be used")
+    say(f"measuring the longest example this GPU can train: up to {budget / 2 ** 30:.1f} GB may be used")
     return find_limit(peak_at, budget)
 
 
-def own_auto_limit(torch, args, model, parameters, device, cuda, local_rank, writer):
+def gpu_name(torch, device):
+    properties = torch.cuda.get_device_properties(device)
+    return f"{properties.name}, {properties.total_memory}"
+
+
+def limit_path(args, local_rank):
+    return os.path.join(args.run_dir, f"limit-{local_rank}.json")
+
+
+def own_auto_limit(torch, args, model, tokenizer, parameters, device, cuda, local_rank, writer):
     """This GPU's limit under max_len=auto: measured once per run and GPU, and kept in the run's folder."""
     if args.limit is not None:
         return args.limit
     if not cuda:
         log("max_len=auto measures GPU memory and there is no GPU here: taking 2048")
         return 2048
-    path = os.path.join(args.run_dir, f"limit-{local_rank}.json")
-    properties = torch.cuda.get_device_properties(device)
-    gpu = f"{properties.name}, {properties.total_memory}"
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(limit_path(args, local_rank), encoding="utf-8") as handle:
             kept = json.load(handle)
-        if kept["gpu"] == gpu:
+        if kept["gpu"] == gpu_name(torch, device):
             return int(kept["limit"])
     except (OSError, ValueError, KeyError, TypeError):
         pass
+
+    def say(text):
+        log(text[0].upper() + text[1:])
+        if writer:
+            write_line(args.status_file, text)
+
     if writer:
         write_line(args.state_file, "measuring")
-    limit = measure_limit(torch, model, parameters, device)
+    try:
+        limit = measure_limit(torch, model, tokenizer, parameters, device, say)
+    except Exception as error:
+        # Training goes on at the usual limit rather than not at all, and the next start measures again
+        traceback.print_exc()
+        say(f"measuring failed ({type(error).__name__}: {str(error)[:200]}): taking 2048 tokens for now")
+        return 2048
     if not limit:
         sys.exit(f"Not even an example of {AUTO_STRIDE} tokens fits on this GPU beside the model: "
                  "free its memory, or use a smaller base model or lora_r")
-    log(f"This GPU takes examples up to {limit} tokens")
-    write_line(path, json.dumps({"gpu": gpu, "limit": limit}))
+    say(f"this GPU takes examples up to {limit} tokens")
+    write_line(limit_path(args, local_rank), json.dumps({"gpu": gpu_name(torch, device), "limit": limit}))
     return limit
 
 
-def lower_auto_limit(args, local_rank, limit):
-    """After running out of memory at a measured limit: the next start takes a tenth less."""
-    path = os.path.join(args.run_dir, f"limit-{local_rank}.json")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            kept = json.load(handle)
-        kept["limit"] = int(limit * 0.9)
-        write_line(path, json.dumps(kept))
-        return kept["limit"]
-    except (OSError, ValueError, TypeError):
-        return None
+def lower_auto_limit(torch, args, device, local_rank, limit):
+    """After running out of memory at this GPU's limit under max_len=auto: the next start takes a tenth less."""
+    lowered = int(limit * 0.9)
+    write_line(limit_path(args, local_rank), json.dumps({"gpu": gpu_name(torch, device), "limit": lowered}))
+    return lowered
 
 
 def all_equal(dist, torch, value, device):
@@ -538,8 +569,19 @@ def add_adapter(torch, model, args):
     return model
 
 
-def main():
-    args = parse_args()
+def versions():
+    import importlib.metadata
+
+    found = []
+    for package in ("torch", "transformers", "peft", "bitsandbytes", "accelerate"):
+        try:
+            found.append(f"{package} {importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            found.append(f"{package} missing")
+    return ", ".join(found)
+
+
+def main(args):
     os.makedirs(args.run_dir, exist_ok=True)
 
     from transformers import AutoTokenizer
@@ -566,6 +608,13 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", 1))
     writer = local_rank == 0  # one worker per rig writes that rig's files
     device = torch.device(f"cuda:{local_rank}" if cuda else "cpu")
+    # For whoever reads the log after something went wrong
+    log(versions())
+    if cuda:
+        free, total = torch.cuda.mem_get_info(device)
+        log(f"GPU {local_rank}: {torch.cuda.get_device_name(device)}, {free / 2 ** 30:.1f} of {total / 2 ** 30:.1f} GB free")
+    else:
+        log("No GPU that PyTorch can use: training on the CPU")
 
     # A stop (the flight sheet ending, or meet.py regrouping because a rig joined) is only noted here. The loop
     # passes it on to the other rigs and saves, between two examples.
@@ -575,7 +624,7 @@ def main():
     def on_stop(*_):
         # Before the loop there is nothing new to save, and loading the model can't be interrupted politely
         if not in_loop:
-            raise SystemExit(75)
+            raise SystemExit(REGROUP)
         stopping.append(1)
 
     for number in (signal.SIGTERM, signal.SIGINT):
@@ -640,7 +689,7 @@ def main():
     # Before any measuring: only a model that is training saves memory by recomputing its activations
     model.train()
     if args.max_len == AUTO:
-        own_limit = own_auto_limit(torch, args, model, parameters, device, cuda, local_rank, writer)
+        own_limit = own_auto_limit(torch, args, model, tokenizer, parameters, device, cuda, local_rank, writer)
     else:
         own_limit = limit_for(parse_limits(args.max_len), memory)
     limits = [int(limit) for limit in share(dist, torch, device, rank, world, own_limit)]
@@ -753,6 +802,7 @@ def main():
                     save()
                     log(f"Nothing to train at {progress()}: waiting for {waiting_for()}")
                     note("idle")
+                    problem.clear(args.problem_file)
                     if writer:
                         write_line(args.state_file, "idle")
                 if writer:
@@ -815,6 +865,9 @@ def main():
                 counts[key] = counts.get(key, 0) + 1
             seen += len(batch)
             steps_done += 1
+            if steps_done == 1:
+                # It trains: whatever stopped earlier attempts is over
+                problem.clear(args.problem_file)
             pace = (time.time() - started) / (seen - first_seen) * step_examples
             # The loss is over this rig's examples of the step; the other rigs log theirs
             own_loss = loss_sum / len(mine) if mine else None
@@ -828,10 +881,9 @@ def main():
     except torch.OutOfMemoryError:
         if writer:
             write_line(args.status_file, "out of GPU memory: lower max_len")
-        lowered = lower_auto_limit(args, local_rank, own_limit) if args.max_len == AUTO else None
-        log(f"Out of GPU memory with examples up to {own_limit} tokens on {memory} GB (max_len={args.max_len}): "
-            + (f"taking {lowered} from the next start" if lowered else "lower the limit for this GPU, or lora_r"))
-        sys.exit(3)
+        lowered = lower_auto_limit(torch, args, device, local_rank, own_limit) if args.max_len == AUTO else None
+        sys.exit(f"Out of GPU memory with examples up to {own_limit} tokens on {memory} GB (max_len={args.max_len}): "
+                 + (f"taking {lowered} from the next start" if lowered else "lower the limit for this GPU, or lora_r"))
     except Exception:
         # Usually a rig that vanished mid-step. The adapter is still as the last whole step left it.
         save()
@@ -841,8 +893,31 @@ def main():
     note("stop")
     log(f"Stopped at {progress()} because a rig is leaving or joining; saved")
     # Not 0: to meet.py that would mean the run is finished, and this one never is
-    sys.exit(75)
+    sys.exit(REGROUP)
+
+
+def run():
+    """main, and what went wrong said where the progress page finds it: the log is on the rig."""
+    args = parse_args()
+    try:
+        main(args)
+    except SystemExit as stop:
+        # 75: stopped for the group to change, which is no failure. A text: the reason, already worded.
+        if stop.code not in (None, 0, REGROUP):
+            problem.report(args.problem_file, stop.code if isinstance(stop.code, str) else f"Stopped with code {stop.code}")
+        raise
+    except Exception as error:
+        if isinstance(error, RuntimeError) and any(sign in str(error).lower() for sign in PEER_LOST_SIGNS):
+            traceback.print_exc()
+            log("The worker of another rig went away")
+            sys.exit(PEER_LOST)
+        frames = traceback.extract_tb(error.__traceback__)
+        ours = [frame for frame in frames if os.path.basename(frame.filename) == "train.py"]
+        where = [f"{os.path.basename(frame.filename)} line {frame.lineno}, in {frame.name}"
+                 for frame in [*ours[-1:], frames[-1]]]
+        problem.report(args.problem_file, f"{type(error).__name__}: {error} ({'; '.join(dict.fromkeys(where))})")
+        raise
 
 
 if __name__ == "__main__":
-    main()
+    run()

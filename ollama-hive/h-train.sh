@@ -87,7 +87,7 @@ train_once() {
     local arguments=(--base "$OH_BASE" --dataset "$OH_DATASET" --run-dir "$OH_RUN_PATH"
         --epochs "$OH_EPOCHS" --max-len "$OH_MAX_LEN" --lora-r "$OH_LORA_R" --lr "$OH_LR"
         --step-size "$OH_STEP_SIZE" --save-steps "$OH_SAVE_STEPS"
-        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status")
+        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --problem-file "$OH_PROBLEM_FILE")
 
     oh_set_state preparing
     log "Fetching $OH_BASE if it isn't on disk, and the dataset if it is there. Free space: $(df -h --output=avail "$OH_DATA_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')"
@@ -100,7 +100,8 @@ train_once() {
     # Its own process group, so h-stop.sh also ends the workers it starts
     setsid "$OH_VENV/bin/python" "$OH_DIR/meet.py" \
         --me "$address" --port "$OH_TRAIN_PORT" --workers "$workers" --run "$OH_RUN_NAME" \
-        --broadcast "${broadcast:-255.255.255.255}" --peers "$OH_PEERS" --rigs-file "$OH_RIGS_FILE" -- \
+        --broadcast "${broadcast:-255.255.255.255}" --peers "$OH_PEERS" --rigs-file "$OH_RIGS_FILE" \
+        --problem-file "$OH_PROBLEM_FILE" -- \
         "$OH_VENV/bin/python" "$OH_DIR/train.py" "${arguments[@]}" >> "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > "$OH_RUN_DIR/server.pid"
@@ -128,7 +129,9 @@ start_status_page() {
     mkdir -p "$OH_RUN_PATH"
     "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
         --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" \
-        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" >> "$LOG_FILE" 2>&1 &
+        --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --log-file "$LOG_FILE" \
+        --problem-file "$OH_PROBLEM_FILE" \
+        >> "$LOG_FILE" 2>&1 &
     log "Progress page: http://$address:$OH_STATUS_PORT/"
 }
 
@@ -136,6 +139,8 @@ start_status_page() {
 # continues from the last checkpoint. Said once on the dashboard per stretch of failures, not on every retry.
 train_loop() {
     local told=""
+    # Left by an earlier time on this flight sheet
+    rm -f "$OH_PROBLEM_FILE"
     start_status_page
     while true; do
         oh_set_state starting

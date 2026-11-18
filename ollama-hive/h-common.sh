@@ -63,6 +63,8 @@ OH_STATUS_PORT=$((OH_TRAIN_PORT + 10))
 OH_TRAIN_DIR="$OH_DATA_DIR/train"
 OH_VENV="$OH_TRAIN_DIR/venv"
 OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
+# What stopped the training's last attempts, for the progress page: see problem.py
+OH_PROBLEM_FILE="$OH_RUN_DIR/train-problem"
 # The rigs of the run that this one has heard: meet.py keeps it, status.py reads it
 OH_RIGS_FILE="$OH_RUN_PATH/rigs.json"
 

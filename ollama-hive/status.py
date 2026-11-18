@@ -6,8 +6,10 @@ the run for theirs and draws them together, so it works with whichever rigs are 
 rented doesn't answer and shows as away.
 
   /          the page
-  /status    what this rig is doing now, and the addresses of the rigs of the run that it has heard (meet.py)
+  /status    what this rig is doing now, what stops it if something does (problem.py), its GPUs, and the addresses
+             of the rigs of the run that it has heard (meet.py)
   /history   the lines train.py wrote since byte ?from=, for a page that keeps asking
+  /log       the end of the miner log, for finding out from another PC why a rig isn't training
 
 Read-only, and anything that can reach the port can read it. Standard library only.
 """
@@ -16,8 +18,11 @@ import argparse
 import http.server
 import json
 import os
+import subprocess
 import time
 import urllib.parse
+
+import problem
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -36,6 +41,35 @@ def rigs_heard(path, me):
             return sorted(set(json.load(handle)) | {me})
     except (OSError, ValueError, TypeError):
         return [me]
+
+
+LOG_END = 64 * 1024  # bytes of the miner log that /log gives
+
+
+def end_of(path, length):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, os.path.getsize(path) - length))
+            return handle.read()
+    except OSError:
+        return b""
+
+
+GPU_FIELDS = "name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw"
+gpus_asked = [0, []]  # when, and the answer: several pages open don't each start nvidia-smi
+
+
+def gpus():
+    """A line per GPU as nvidia-smi gives it: name, MiB used, MiB in all, % busy, degrees, watts."""
+    if time.time() - gpus_asked[0] > 5:
+        try:
+            answer = subprocess.run(["nvidia-smi", f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"],
+                                    capture_output=True, text=True, timeout=10).stdout
+            gpus_asked[1] = [[field.strip() for field in line.split(",")] for line in answer.splitlines() if line.strip()]
+        except (OSError, subprocess.SubprocessError):
+            gpus_asked[1] = []
+        gpus_asked[0] = time.time()
+    return gpus_asked[1]
 
 
 def history_since(path, start):
@@ -66,6 +100,8 @@ def main():
     parser.add_argument("--version", default="")
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--status-file", required=True)
+    parser.add_argument("--log-file", default="")
+    parser.add_argument("--problem-file", default="")
     args = parser.parse_args()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -90,7 +126,9 @@ def main():
             elif url.path == "/status":
                 self.send_json({"address": args.me, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
-                                "state": read_line(args.state_file), "status": read_line(args.status_file)})
+                                "state": read_line(args.state_file), "status": read_line(args.status_file),
+                                "problem": problem.read(args.problem_file), "gpus": gpus(),
+                                "log": bool(args.log_file)})
             elif url.path == "/history":
                 query = urllib.parse.parse_qs(url.query)
                 try:
@@ -98,6 +136,8 @@ def main():
                 except ValueError:
                     start = 0
                 self.send_json(history_since(os.path.join(args.run_dir, "history.jsonl"), start))
+            elif url.path == "/log" and args.log_file:
+                self.send(end_of(args.log_file, LOG_END), "text/plain; charset=utf-8")
             else:
                 self.send_error(404)
 

@@ -35,6 +35,11 @@ h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--idle); }
 .dot.on { background: var(--series); }
 .dot.off { background: none; border: 1px solid var(--muted); }
+.dot.bad { background: var(--critical); }
+.rig.bad { border-color: var(--critical); }
+.rig .problem { color: var(--ink); }
+.rig button, .card button { font: inherit; color: var(--series); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+pre { margin: 8px 0 0; max-height: 420px; overflow: auto; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
 .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
 .tile .label { color: var(--ink-2); font-size: 12px; }
@@ -77,6 +82,9 @@ th:first-child, td:first-child { text-align: left; }
   <h1>Training progress</h1>
   <p class="sub" id="sub">Asking the rigs…</p>
   <div class="rigs" id="rigs"></div>
+  <div class="card" id="log-card" hidden><h2 id="log-title"></h2>
+    <p class="note">The end of the rig's miner log, newest at the bottom. <a id="log-link" target="_blank" rel="noopener">Open it in a new tab</a> · <button id="log-close">Close</button></p>
+    <pre id="log"></pre></div>
   <div class="tiles" id="tiles"></div>
   <div class="card"><h2>Do the rigs hold each other up?</h2>
     <div id="verdicts"></div>
@@ -143,6 +151,36 @@ function addRigs(addresses) {
   }
 }
 
+const escaped = text => String(text).replace(/[&<>"]/g, sign => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[sign]);
+let logOf = null;  // the rig whose miner log is shown
+
+async function showLog() {
+  $("log-card").hidden = !logOf;
+  if (!logOf) return;
+  const url = `http://${logOf}:${port}/log`;
+  $("log-title").textContent = `Miner log of ${logOf}`;
+  $("log-link").href = url;
+  let text;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    text = response.ok ? await response.text() : "This rig's miner doesn't give its log: it is older than v0.10.";
+  } catch (error) { text = "The rig isn't answering."; }
+  const view = $("log"), atEnd = view.scrollHeight - view.scrollTop - view.clientHeight < 40 || !view.textContent;
+  view.textContent = text.split("\n").slice(-400).join("\n");
+  if (atEnd) view.scrollTop = view.scrollHeight;
+}
+$("log-close").onclick = () => { logOf = null; showLog(); };
+$("rigs").onclick = event => {
+  const address = event.target.dataset && event.target.dataset.log;
+  if (address) { logOf = address; showLog().then(() => $("log-card").scrollIntoView({ behavior: "smooth", block: "nearest" })); }
+};
+
+// What a rig's GPUs are doing, from nvidia-smi: name, MiB used, MiB in all, % busy, degrees, watts
+function gpuLines(status) {
+  return (status.gpus || []).map(([name, used, total, busy, degrees, watts]) =>
+    `<br>${escaped(name.replace(/^NVIDIA (GeForce )?/, ""))}: ${(used / 1024).toFixed(1)} of ${(total / 1024).toFixed(1)} GB in use · ${busy}% busy · ${degrees}°C · ${Math.round(watts)} W`).join("");
+}
+
 async function askRig(address, rig) {
   const base = `http://${address}:${port}`;
   const [status, history] = await Promise.all([getJSON(`${base}/status`), getJSON(`${base}/history?from=${rig.next}`)]);
@@ -167,6 +205,7 @@ async function poll() {
   }
   await Promise.all([...rigs].map(([address, rig]) => askRig(address, rig)));
   render();
+  showLog();
 }
 
 // ---- what the lines say
@@ -436,10 +475,14 @@ function render() {
     const state = rig.status ? rig.status.state : "";
     // lim: the longest example the rig takes, on every line it writes
     const limit = rig.lines.length ? rig.lines[rig.lines.length - 1].lim : undefined;
+    const problem = rig.status && rig.status.problem;
     const text = (!rig.status ? "Not answering: rented, off, or on another flight sheet"
-      : `${state || "starting"}${rig.status.status ? " · " + rig.status.status : ""}`)
-      + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "");
-    return `<div class="rig"><i class="dot ${state === "training" ? "on" : rig.status ? "" : "off"}"></i><b>${address}</b><br><span>${text}</span></div>`;
+      : `${escaped(state || "starting")}${rig.status.status ? " · " + escaped(rig.status.status) : ""}`)
+      + (problem ? `<br><span class="problem">${levelMark(LEVELS[0], `Not training: failed ${problem.failures > 1 ? problem.failures + " times in a row" : "to start"}, last at ${fullTime(problem.at)}`)}<br>${escaped(problem.error)}</span>` : "")
+      + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "")
+      + (rig.status ? gpuLines(rig.status) : "")
+      + (rig.status && rig.status.log ? `<br><button data-log="${address}">Miner log</button>` : "");
+    return `<div class="rig ${problem ? "bad" : ""}"><i class="dot ${problem ? "bad" : state === "training" ? "on" : rig.status ? "" : "off"}"></i><b>${address}</b><br><span>${text}</span></div>`;
   }).join("");
 
   const latest = lines[lines.length - 1];
