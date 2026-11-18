@@ -141,16 +141,22 @@ train_once() {
     wait "$SERVER_PID"
 }
 
+# A Python for the scripts that need no package (status.py, meet.py hear): a rig that never trained has no venv
+plain_python() {
+    [[ -x $OH_VENV/bin/python ]] && { echo "$OH_VENV/bin/python"; return; }
+    command -v python3
+}
+
 # The progress page and this rig's part of its data, for as long as the flight sheet runs, whatever its mode: what
 # the rig is doing, its GPU memory and the miner log are worth seeing while it serves or exports too. h-stop.sh ends
 # it. It needs no package, so a rig that never trained runs it on the system's Python.
 start_status_page() {
-    local address python="$OH_VENV/bin/python" ollama=""
+    local address python ollama=""
     address=$(oh_lan_address)
     [[ -n $address ]] || return
     # Where this rig's Ollama will be: the page says what it has loaded, and whether all of it is on the GPU
     [[ $OH_MODE == train ]] || ollama="http://$address:$OH_PORT"
-    [[ -x $python ]] || python=$(command -v python3) || { log "No Python on this rig for the progress page"; return; }
+    python=$(plain_python) || { log "No Python on this rig for the progress page"; return; }
     mkdir -p "$OH_RUN_PATH"
     "$python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
         --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" --mode "$OH_MODE" \

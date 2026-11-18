@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.19.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.20.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -404,12 +404,16 @@ at the same quantization it takes the same VRAM and runs at the same speed. Only
 |---|---|---|
 | `model` | none, required | The stock Ollama model the run was trained from. Its Modelfile (renderer, parser, parameters) and vision projector are reused |
 | `full_base` | none, required | Hugging Face repo of the base model at full precision, not the `-bnb-4bit` one used for training |
-| `run_name` | `run1` | The run to export, as it stands on this rig |
+| `run_name` | `run1` | The run to export: its adapter is fetched from a rig that is training it just now, or else the one on this rig is used |
 | `export_name` | the `run_name` | Name of the Ollama model to make |
 | `quant` | `Q4_K_M` | Quantization, as `llama-quantize` names them. Use the stock model's to match its VRAM |
 | `llama_cpp` | `b12477` | llama.cpp release used to convert and quantize |
 
-The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the first start the rig:
+The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the first start the rig first listens a few seconds
+for the rigs that are training `run_name` (they say so on the LAN, which is also how they find each other) and fetches
+the adapter from one of them, as it stands at that moment. No address is needed and the training goes on. If none is
+heard, the adapter already in `<data_dir>/train/runs/<run_name>/adapter` on this rig is used: the rig's own if it
+trained, or a copy of that folder from a rig that did. Then it:
 
 1. downloads `full_base` one weights file at a time and adds the adapter to each (never more than one file in memory,
    no second copy of the base on disk);
@@ -424,8 +428,7 @@ further since, give a new `export_name` (and `ollama rm` the old model when it i
 
 It needs about 2.4 x the base model's size free on the data drive while it runs (about 135 GB for a 27B model) and
 checks before starting; all of it but the final model (17 GB at Q4_K_M) is deleted afterwards. A stopped export
-continues where it was. The export runs on each rig that should serve the model: a rig that didn't train needs the
-run's `adapter` folder copied to `<data_dir>/train/runs/<run_name>/adapter` first.
+continues where it was, with the adapter it started with. The export runs on each rig that should serve the model.
 
 The merge is done at the base model's own 16-bit precision, like PEFT's and Unsloth's exports.
 
@@ -446,7 +449,7 @@ everything but the last step runs on the CPU, so the rig is slower meanwhile.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `from` | none | A rig that is training the run, `address` or `address:port`. Without it, the adapter already in `<data_dir>/train/runs/<run_name>/adapter` on this rig is used |
+| `from` | none | A rig that is training the run, `address` or `address:port`. Without it, as for `mode=export`: a rig heard training the `run_name` of this rig's flight sheet, or else the adapter already on this rig |
 | `export_name` | the run's name | Name of the Ollama model to make. One that exists is not overwritten: give a new name for a run that has trained further |
 | `full_base` | the flight sheet's, of this rig or the training rig | As for `mode=export`. Put `full_base=` on the training flight sheet and the command needs no more than `from=` |
 | `run_name`, `model`, `quant`, `llama_cpp` | this rig's flight sheet | As for `mode=export`. `model` is the stock model whose Modelfile is reused: by default the one this rig serves |
@@ -477,7 +480,7 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 
 - `h-run.sh`: start-up checks, then runs Ollama, or the training run
 - `h-train.sh`: `mode=train`: installs the training environment and runs `meet.py`
-- `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group
+- `meet.py`: agrees with the other rigs on who is training now, and starts `train.py` for that group; `meet.py hear` lists the rigs training a run, for the export
 - `train.py`: one worker of the QLoRA run
 - `status.py`, `status.html`: the progress page of a run, and the rig's part of its data
 - `requirements-speedups.txt`: the optional packages of `speedups=1`

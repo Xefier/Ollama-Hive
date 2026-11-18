@@ -8,7 +8,8 @@
 # how it goes in the miner log. The model it makes is then one more model of this rig's Ollama: ask for it by name.
 #
 #   from=         a rig that is training the run: its adapter is fetched from there, as it stands now. Without it,
-#                 the adapter already on this rig is used (<data_dir>/train/runs/<run_name>/adapter)
+#                 from a rig heard training the run of this rig's flight sheet (run_name=), or else the adapter
+#                 already on this rig is used (<data_dir>/train/runs/<run_name>/adapter)
 #   export_name=  the Ollama model to make. Default: the run's name
 #   full_base=    Hugging Face repo of the base model at full precision. Default: the flight sheet's, of this rig or
 #                 of the rig in from=
@@ -55,7 +56,7 @@ for item in "$@"; do
         model=*)        OH_MODEL=$value ;;
         quant=*)        OH_QUANT=$value ;;
         llama_cpp=*)    OH_LLAMA_CPP=$value ;;
-        *)              echo "Not a setting of this command: $item"; sed -n '3,19p' "${BASH_SOURCE[0]}" | cut -c3-; exit 2 ;;
+        *)              echo "Not a setting of this command: $item"; sed -n '3,20p' "${BASH_SOURCE[0]}" | cut -c3-; exit 2 ;;
     esac
 done
 [[ "$from$OH_EXPORT_NAME$OH_FULL_BASE$OH_RUN_NAME$OH_MODEL$OH_QUANT$OH_LLAMA_CPP" =~ ^[A-Za-z0-9._:/-]*$ ]] \
@@ -85,55 +86,15 @@ export HOME="$OH_DATA_DIR/home"
 export OLLAMA_HOST="$address:$OH_PORT"
 export OLLAMA_MODELS="$OH_DATA_DIR/models"
 
-# Takes the run's adapter from a rig that is training it (status.py there hands it out). That rig writes it anew at
-# every checkpoint, so what it says it has is compared before and after.
-fetch_adapter() {
-    local source=$1
-    [[ $source == *:* ]] || source="$source:$OH_STATUS_PORT"
-    oh_is_private "$source" || { log "from=$from is not a private LAN address"; return 1; }
-    local listing again kind name size try
-    for try in 1 2 3; do
-        listing=$(curl -fs --max-time 20 "http://$source/adapter") \
-            || { log "http://$source/adapter gave nothing: is that rig on the training flight sheet, with v0.15 or newer, and has it trained a step?"; return 1; }
-        name=$(awk '$1 == "run" { print $2 }' <<< "$listing")
-        [[ -z $run_given && -n $name ]] && OH_RUN_NAME=$name
-        [[ -n $OH_FULL_BASE ]] || OH_FULL_BASE=$(awk '$1 == "full_base" { print $2 }' <<< "$listing")
-        OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
-        local seen target="$OH_RUN_PATH/adapter" incoming="$OH_RUN_PATH/adapter.incoming"
-        seen=$(awk '$1 == "seen" { print $2 }' <<< "$listing")
-        if [[ -n $seen && $(cat "$target/examples-seen" 2>/dev/null) == "$seen" ]]; then
-            log "The adapter of run $OH_RUN_NAME on this rig is already the one $source has (trained on $seen examples)"
-            return 0
-        fi
-        log "Fetching the adapter of run $OH_RUN_NAME from $source (trained on $seen examples)"
-        rm -rf "$incoming"
-        mkdir -p "$incoming"
-        local complete=1
-        while read -r kind name size; do
-            [[ $kind == file ]] || continue
-            curl -fs --max-time 1800 -o "$incoming/$name" "http://$source/adapter/$name" &
-            wait $! && [[ $(stat -c %s "$incoming/$name" 2>/dev/null) == "$size" ]] || { complete=0; break; }
-        done <<< "$listing"
-        again=$(curl -fs --max-time 20 "http://$source/adapter")
-        if [[ $complete == 1 && $again == "$listing" ]]; then
-            rm -rf "$target"
-            mv "$incoming" "$target"
-            return 0
-        fi
-        log "The adapter changed while it was fetched (that rig saved a checkpoint): once more"
-        sleep 5
-    done
-    rm -rf "$incoming"
-    log "Could not fetch a whole adapter from $source"
-    return 1
-}
-
-run_given=""
+# Without run_name= the run is the one the rig in from= trains
+OH_RUN_GIVEN=""
 for item in "$@"; do
-    [[ $item == run_name=* ]] && run_given=1
+    [[ $item == run_name=* ]] && OH_RUN_GIVEN=1
 done
 if [[ -n $from ]]; then
     fetch_adapter "$from" || exit 1
+    # That is the adapter asked for: export_model looks for no other
+    OH_ADAPTER_FETCHED=1
 fi
 OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
 OH_EXPORT_WORK="$OH_RUN_PATH/export"

@@ -103,6 +103,72 @@ export_has_space() {
     return 1
 }
 
+# The run is the flight sheet's; export-run.sh without run_name= takes the one the rig in from= trains
+OH_RUN_GIVEN=1
+
+# Takes the run's adapter from a rig that is training it (status.py there hands it out). That rig writes it anew at
+# every checkpoint, so what it says it has is compared before and after.
+fetch_adapter() {
+    local source=$1
+    [[ $source == *:* ]] || source="$source:$OH_STATUS_PORT"
+    oh_is_private "$source" || { log "$source is not a private LAN address"; return 1; }
+    local listing again kind name size try
+    for try in 1 2 3; do
+        listing=$(curl -fs --max-time 20 "http://$source/adapter") \
+            || { log "http://$source/adapter gave nothing: is that rig on the training flight sheet, with v0.15 or newer, and has it trained a step?"; return 1; }
+        name=$(awk '$1 == "run" { print $2 }' <<< "$listing")
+        if [[ -z $OH_RUN_GIVEN && -n $name ]]; then
+            OH_RUN_NAME=$name
+        elif [[ -n $name && $name != "$OH_RUN_NAME" ]]; then
+            log "$source trains run $name, not $OH_RUN_NAME"
+            return 1
+        fi
+        [[ -n $OH_FULL_BASE ]] || OH_FULL_BASE=$(awk '$1 == "full_base" { print $2 }' <<< "$listing")
+        OH_RUN_PATH="$OH_TRAIN_DIR/runs/$OH_RUN_NAME"
+        local seen target="$OH_RUN_PATH/adapter" incoming="$OH_RUN_PATH/adapter.incoming"
+        seen=$(awk '$1 == "seen" { print $2 }' <<< "$listing")
+        if [[ -n $seen && $(cat "$target/examples-seen" 2>/dev/null) == "$seen" ]]; then
+            log "The adapter of run $OH_RUN_NAME on this rig is already the one $source has (trained on $seen examples)"
+            return 0
+        fi
+        log "Fetching the adapter of run $OH_RUN_NAME from $source (trained on $seen examples)"
+        rm -rf "$incoming"
+        mkdir -p "$incoming"
+        local complete=1
+        while read -r kind name size; do
+            [[ $kind == file ]] || continue
+            curl -fs --max-time 1800 -o "$incoming/$name" "http://$source/adapter/$name" &
+            wait $! && [[ $(stat -c %s "$incoming/$name" 2>/dev/null) == "$size" ]] || { complete=0; break; }
+        done <<< "$listing"
+        again=$(curl -fs --max-time 20 "http://$source/adapter")
+        if [[ $complete == 1 && $again == "$listing" ]]; then
+            rm -rf "$target"
+            mv "$incoming" "$target"
+            return 0
+        fi
+        log "The adapter changed while it was fetched (that rig saved a checkpoint): once more"
+        sleep 5
+    done
+    rm -rf "$incoming"
+    log "Could not fetch a whole adapter from $source"
+    return 1
+}
+
+# The rigs training the run say so on the LAN every few seconds (meet.py): the adapter is taken from one of them, as
+# it stands now, so the rig that makes the model needs no copy of its own and no address in its flight sheet.
+# Without one to hear, the adapter already on this rig is the one.
+fetch_adapter_from_training_rig() {
+    local python rig rigs
+    python=$(plain_python) || return 1
+    export_says "0% · listening for a rig that is training run $OH_RUN_NAME, for its adapter"
+    rigs=$("$python" "$OH_DIR/meet.py" hear --run "$OH_RUN_NAME" --port "$OH_TRAIN_PORT" 2>> "$LOG_FILE")
+    [[ -n $rigs ]] || { log "No rig heard training run $OH_RUN_NAME just now"; return 1; }
+    for rig in $rigs; do
+        fetch_adapter "$rig" && return 0
+    done
+    return 1
+}
+
 # Needs the Ollama server running (start_server). Every stage leaves its result in $OH_EXPORT_WORK and is skipped when
 # that result is there, so a stopped export continues where it was.
 export_model() {
@@ -119,8 +185,10 @@ export_model() {
     fi
 
     local adapter="$OH_RUN_PATH/adapter"
+    # Before the first stage only: a model is made of one adapter from start to end
+    [[ -n $OH_ADAPTER_FETCHED || -d $OH_EXPORT_WORK ]] || fetch_adapter_from_training_rig
     if [[ ! -f $adapter/adapter_model.safetensors ]]; then
-        log "No run $OH_RUN_NAME on this rig: $adapter has no adapter. Copy it from a rig that trained, or check run_name"
+        log "No adapter of run $OH_RUN_NAME: no rig is training it just now (with v0.15 or newer, past its first step), and $adapter on this rig has none. Check run_name, or copy the folder from a rig that trained"
         return 1
     fi
     export HF_HOME="$OH_TRAIN_DIR/hf"

@@ -73,6 +73,38 @@ def by_address(address):
     return socket.inet_aton(address)
 
 
+def read_message(data, run):
+    """What a rig said on the LAN, if it is a rig of this run. None for anything else that uses the port."""
+    try:
+        message = json.loads(data)
+        if message["run"] != run:
+            return None
+        by_address(message["address"])
+        return {"address": message["address"], "hosting": bool(message["hosting"]),
+                "leaving": bool(message.get("leaving"))}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def hear_rigs(port, run, seconds):
+    """The rigs that say within these seconds that they are training the run, lowest address first. For a rig
+    that isn't training itself and wants the run's adapter (h-export.sh)."""
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    receiver.bind(("", port))
+    rigs = set()
+    until = time.time() + seconds
+    while time.time() < until:
+        receiver.settimeout(max(0.05, until - time.time()))
+        try:
+            message = read_message(receiver.recv(2048), run)
+        except OSError:
+            continue
+        if message and not message["leaving"]:
+            rigs.add(message["address"])
+    return sorted(rigs, key=by_address)
+
+
 class Radio:
     """How the rigs of a run find each other. Every rig says every BEAT that it is here, and whether it hosts the
     meeting: to the whole LAN by broadcast, and to the addresses of peers= one by one for a network that doesn't
@@ -123,16 +155,14 @@ class Radio:
     def listen(self):
         while True:
             try:
-                message = json.loads(self.receiver.recv(2048))
-                if message["run"] != self.run or message["address"] == self.me:
-                    continue
-                by_address(message["address"])
-                now = time.time()
-                self.heard[message["address"]] = {"at": now, "hosting": bool(message["hosting"]),
-                                                  "leaving": bool(message.get("leaving"))}
-                self.known[message["address"]] = now
-            except (OSError, ValueError, KeyError, TypeError):
-                pass  # something else on the LAN uses this port
+                message = read_message(self.receiver.recv(2048), self.run)
+            except OSError:
+                continue
+            if not message or message["address"] == self.me:
+                continue
+            now = time.time()
+            self.heard[message["address"]] = {"at": now, "hosting": message["hosting"], "leaving": message["leaving"]}
+            self.known[message["address"]] = now
 
     def write_rigs(self):
         """When the rigs of the run change, and every minute for the times."""
@@ -404,7 +434,23 @@ class Rig:
         return 75
 
 
+def hear():
+    """meet.py hear --run NAME --port PORT: prints the rigs training the run just now, one per line."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run", required=True)
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--seconds", type=float, default=HEARD_FOR)
+    args = parser.parse_args(sys.argv[2:])
+    try:
+        for rig in hear_rigs(args.port, args.run, args.seconds):
+            print(rig)
+    except OSError as error:
+        sys.exit(f"[meet] Can't listen for the rigs of the run on port {args.port} ({error})")
+
+
 def main():
+    if sys.argv[1:2] == ["hear"]:
+        return hear()
     parser = argparse.ArgumentParser()
     parser.add_argument("--me", required=True, help="this rig's address")
     parser.add_argument("--run", required=True, help="name of the run: rigs of another run are not heard")
