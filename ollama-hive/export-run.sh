@@ -142,7 +142,9 @@ OH_STOCK_MODEL=$OH_MODEL
 
 problem=$(find_export_settings_problem)
 [[ -z $problem ]] || fail "${problem/to the flight sheet/to the command}"
+# One that v0.16 or earlier made in a layout Ollama can't load is made again instead (export_model)
 "$OH_BIN" show "$OH_EXPORT_NAME" >/dev/null 2>&1 \
+    && ! curl -fs --max-time 300 "$OH_API/api/show" -d "{\"model\":\"$OH_EXPORT_NAME\",\"verbose\":true}" 2>/dev/null | grep -q 'ssm_beta_alpha\|attn_qkv_gate' \
     && fail "This rig already has a model called $OH_EXPORT_NAME: give another export_name=, or remove it first (ollama rm)"
 
 # The downloads are where it most often stops, and they are back by themselves: every stage that is done stays done

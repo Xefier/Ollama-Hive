@@ -41,6 +41,8 @@ OH_RUN_NAME=run1
 OH_EPOCHS=3
 OH_MAX_LEN=2048
 OH_LORA_R=16
+# 4: the base model in 4 bits per weight (QLoRA). 16: as it is stored, for a GPU that holds it whole
+OH_BITS=4
 OH_LR=2e-4
 OH_STEP_SIZE=8
 OH_SAVE_STEPS=25

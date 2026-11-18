@@ -88,6 +88,8 @@ def parse_args():
     parser.add_argument("--gpu-gb", type=int, help="this rig's GPU memory, instead of asking the GPU")
     parser.add_argument("--limit", type=int, help="this rig's limit under max_len=auto, instead of measuring it")
     parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--bits", type=int, default=4, choices=(4, 16),
+                        help="4: the base model in 4 bits per weight. 16: as it is stored, with --base the full repo")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--step-size", type=int, default=8, help="examples per step, shared by the rigs present")
     parser.add_argument("--save-steps", type=int, default=25)
@@ -314,6 +316,9 @@ def fingerprint(args, torch_version):
     settings. Not the dataset: that changes during a run, and the rigs pass it on (sync_dataset)."""
     parts = [args.base, args.epochs, args.max_len, args.lora_r, args.lr, args.step_size,
              args.seed, torch_version]
+    if args.bits != 4:
+        # Only then, so that the runs from before there was a choice go on
+        parts.append(args.bits)
     return int(hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:15], 16)
 
 
@@ -700,9 +705,10 @@ def load_model(torch, args, device, cuda):
     kwargs = {"device_map": {"": device}}
     if cuda:
         kwargs["dtype"] = torch.bfloat16
-        kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16)
+        if args.bits == 4:
+            kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16)
     # The text-only class first: it leaves the vision tower off the GPU where the architecture has one
     problem = None
     for name in ("AutoModelForCausalLM", "AutoModelForMultimodalLM", "AutoModelForImageTextToText"):
@@ -720,7 +726,10 @@ def load_model(torch, args, device, cuda):
             problem = ValueError(f"{name} left {len(missing)} weights unset, e.g. {missing[0]}")
             del model
             continue
-        log(f"Loaded {args.base} with {name}")
+        if args.bits != 4 and any(parameter.dtype == torch.uint8 for parameter in model.parameters()):
+            sys.exit(f"bits={args.bits} is for the full-precision repo of the model, and {args.base} holds it in 4 bits: "
+                     "set base= to the repo without -bnb-4bit, or leave bits= out")
+        log(f"Loaded {args.base} with {name}" + ("" if args.bits == 4 or not cuda else ", at full precision"))
         return model
     sys.exit(f"Could not load {args.base}: {problem}")
 

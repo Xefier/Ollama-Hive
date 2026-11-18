@@ -84,7 +84,17 @@ export_has_space() {
 # Needs the Ollama server running (start_server). Every stage leaves its result in $OH_EXPORT_WORK and is skipped when
 # that result is there, so a stopped export continues where it was.
 export_model() {
-    "$OH_BIN" show "$OH_EXPORT_NAME" >/dev/null 2>&1 && return 0
+    if "$OH_BIN" show "$OH_EXPORT_NAME" >/dev/null 2>&1; then
+        # v0.16 and earlier wrote two pairs of weights as one tensor each, which Ollama can't load (export.py
+        # convert). Such a model is no use to anyone: it is made again.
+        if curl -fs --max-time 300 "$OH_API/api/show" -d "{\"model\":\"$OH_EXPORT_NAME\",\"verbose\":true}" 2>/dev/null |
+            grep -q 'ssm_beta_alpha\|attn_qkv_gate'; then
+            log "$OH_EXPORT_NAME was made in a layout this Ollama can't load (by v0.16 or earlier): removing it and making it again"
+            "$OH_BIN" rm "$OH_EXPORT_NAME" >> "$LOG_FILE" 2>&1
+        else
+            return 0
+        fi
+    fi
 
     local adapter="$OH_RUN_PATH/adapter"
     if [[ ! -f $adapter/adapter_model.safetensors ]]; then
@@ -116,10 +126,10 @@ export_model() {
             export_says "step 2 of 4: converting to the format Ollama reads"
             log "Converting to GGUF"
             if [[ $direct == 1 ]]; then
-                export_step "$OH_CONVERT_PYTHON" "$OH_CONVERT_SCRIPT" "$merged" --outfile "$final.tmp" --outtype q8_0 || return 1
+                export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" convert "$OH_CONVERT_SCRIPT" "$merged" --outfile "$final.tmp" --outtype q8_0 || return 1
                 mv "$final.tmp" "$final"
             else
-                export_step "$OH_CONVERT_PYTHON" "$OH_CONVERT_SCRIPT" "$merged" --outfile "$full.tmp" --outtype bf16 || return 1
+                export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" convert "$OH_CONVERT_SCRIPT" "$merged" --outfile "$full.tmp" --outtype bf16 || return 1
                 mv "$full.tmp" "$full"
             fi
         fi

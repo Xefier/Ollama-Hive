@@ -8,6 +8,7 @@ speed as the stock model.
   export.py size --base REPO                     bytes of the base model's weights
   export.py merge --adapter DIR --base REPO --out DIR
   export.py modelfile STOCK_MODELFILE GGUF       the stock model's Modelfile, with its weights swapped for GGUF
+  export.py convert SCRIPT ARGUMENTS...          llama.cpp's converter, writing the tensors the way Ollama reads them
 
 The merge never holds more than one weights file in memory and never keeps a second copy of the base on disk: each
 file is downloaded, merged, written and its download deleted. It can be stopped and started again.
@@ -175,6 +176,36 @@ def merge(args):
     log(f"Merged {len(modules)} layers into {args.out}")
 
 
+def convert(args):
+    """Runs llama.cpp's convert_hf_to_gguf.py with one thing changed. For some architectures (Qwen3.5/3.8) it writes
+    pairs of weights that share an input as one tensor each (attn_qkv_gate, ssm_beta_alpha), which llama.cpp itself
+    reads either way. Ollama's own build of it only knows them apart, as in the models of its registry, and fails
+    to load the other with "tensor 'blk.0.ssm_beta.weight' not found". The converter has no option for it: the
+    pairs are a list on its model classes, emptied here before it runs."""
+    import importlib
+    import pkgutil
+    import runpy
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(args.script)))
+    try:
+        import conversion
+    except ImportError:
+        conversion = None  # a release from before the converter was split into modules, which had no such pairs
+    apart = 0
+    for found in pkgutil.iter_modules(conversion.__path__) if conversion else []:
+        try:
+            module = importlib.import_module(f"conversion.{found.name}")
+        except Exception:  # an architecture whose own packages aren't installed: not the one being converted
+            continue
+        for value in vars(module).values():
+            if isinstance(value, type) and getattr(value, "_SHARED_INPUT_MERGES", None):
+                value._SHARED_INPUT_MERGES = ()
+                apart += 1
+    log(f"Converting with paired weights kept apart ({apart} model classes of the converter pair them)")
+    sys.argv = [args.script, *args.arguments]
+    runpy.run_path(args.script, run_name="__main__")
+
+
 def size(args):
     if os.path.isdir(args.base):
         print(sum(os.path.getsize(os.path.join(args.base, name)) for name in os.listdir(args.base)
@@ -216,6 +247,10 @@ def main():
     command.add_argument("--out", required=True)
     command.add_argument("--status-file", help="where to say how far it is, for the progress page")
     command.set_defaults(run=merge)
+    command = commands.add_parser("convert")
+    command.add_argument("script")
+    command.add_argument("arguments", nargs=argparse.REMAINDER)
+    command.set_defaults(run=convert)
     command = commands.add_parser("modelfile")
     command.add_argument("stock")
     command.add_argument("gguf")

@@ -104,7 +104,7 @@ train_once() {
     rm -f "$OH_RUN_DIR/train-status"
 
     local arguments=(--base "$OH_BASE" --dataset "$OH_DATASET" --run-dir "$OH_RUN_PATH"
-        --epochs "$OH_EPOCHS" --max-len "$OH_MAX_LEN" --lora-r "$OH_LORA_R" --lr "$OH_LR"
+        --epochs "$OH_EPOCHS" --max-len "$OH_MAX_LEN" --lora-r "$OH_LORA_R" --bits "$OH_BITS" --lr "$OH_LR"
         --step-size "$OH_STEP_SIZE" --save-steps "$OH_SAVE_STEPS"
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --problem-file "$OH_PROBLEM_FILE"
         --memory-file "$OH_MEMORY_FILE")

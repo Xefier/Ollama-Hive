@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.16.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.17.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -207,6 +207,7 @@ on with whichever rigs are on this flight sheet, down to one, and pauses only wh
 | `epochs` | `3` | Times each example is trained |
 | `max_len` | `2048` | Longest example in tokens; longer ones are left out, not cut. Lower it if a GPU runs out of memory. One number for every rig, or a limit per GPU memory size in GB: `24:2048,32:6144` gives a 24 GB card 2048 and a 32 GB card 6144. The examples only the larger card can hold go to it, and wait while it is rented. `auto`: every rig measures its own limit, see below |
 | `lora_r` | `16` | Adapter rank |
+| `bits` | `4` | `4`: the base model in 4 bits per weight, which is what lets a 27B fit a 24 or 32 GB card. `16`: the model as it is stored, for a GPU that holds it whole (about 56 GB for a 27B); `base` is then the full repo, without `-bnb-4bit`. Rigs of one run all use the same |
 | `lr` | `2e-4` | Learning rate, reached over 10 warm-up steps and then held: there is no end to come down to |
 | `step_size` | `8` | Examples per step, shared between the rigs training at that moment by their speed: one alone does all 8. A higher value gives more to balance with, and less network traffic per example. It replaces `grad_accum`, and a run started with that needs a new `run_name` |
 | `save_steps` | `25` | Steps between checkpoints. A stop saves too, so this only matters for a crash or a power cut |
@@ -291,6 +292,13 @@ didn't install, the rig trains without it and the miner log says why. The rigs o
 With `max_len=auto` a rig measures its limit again when this changes. It has run on an RTX 5090 with a small model of this architecture, not yet with a 27B: turn it on once a rig
 trains, and compare the seconds per step on the progress page. The other package
 the library asks for, `causal-conv1d`, is not installed: it needs a CUDA compiler on the rig.
+
+**`bits=16`.** With 4 bits the adapter learns beside a rounded copy of the model, and the export then adds it to
+the real weights and rounds those again, another way. At full precision it learns beside the weights it is added
+to, and only the rounding for serving is left, which the stock model has as well. It takes a GPU with room for the
+whole model: `base=Qwen/Qwen3.8-27B bits=16` needs about 56 GB before the first example, so a 96 GB card, which then
+has about half the room for examples that it has with 4 bits. The export is the same, and the model it makes serves
+on the same cards as before. Run so far on an RTX 5090 with a small model of this architecture only.
 
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
@@ -405,7 +413,9 @@ The serving settings (`num_ctx`, `kv_cache_type`, ...) apply as usual. On the fi
 
 1. downloads `full_base` one weights file at a time and adds the adapter to each (never more than one file in memory,
    no second copy of the base on disk);
-2. converts the merged model to GGUF and quantizes it with llama.cpp, installed under `<data_dir>/train/convert`;
+2. converts the merged model to GGUF and quantizes it with llama.cpp, installed under `<data_dir>/train/convert`.
+   The converter runs with one thing changed (`export.py convert`): for Qwen3.5/3.8 it would write two pairs of
+   weights as one tensor each, which llama.cpp reads and Ollama's own build of it does not;
 3. imports it with `ollama create`, using the stock model's Modelfile with only the weights swapped.
 
 Then, and on every later start, it finds `export_name` already there and just serves it, so the flight sheet can stay
@@ -446,8 +456,10 @@ is tried again by itself, five times two minutes apart. It needs the same free d
 
 **Tested** in WSL (Ubuntu 20.04) with a small model: the whole flow with llama.cpp's real converter and
 `llama-quantize`, against a stand-in for the `ollama` binary, and the merged weights are bit-identical to PEFT's own
-merge. Not yet run: a 27B model, and Ollama's import of the result (a new weights file next to the stock projector,
-renderer and parser).
+merge. A small model of the Qwen3.5/3.8 architecture comes out with the same kinds of tensors, quantized the same
+way, as the `qwen3.8:27b` of Ollama's registry. On a rig, a 27B has been merged, converted, quantized and taken in
+by Ollama 0.40.16, which then could not load it for the paired tensors above; with that changed, loading it is not
+yet seen. A model made before the change is found by its tensors and made again.
 
 ## Checks on a rig
 

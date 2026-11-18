@@ -19,6 +19,7 @@ ollama_hive_valid() {
         train_port|epochs|lora_r|step_size|save_steps) [[ $2 =~ ^[1-9][0-9]*$ ]] ;;
         # One limit, one per GPU memory size in GB (24:2048,32:6144), or auto: every rig measures its own
         max_len)                        [[ $2 =~ ^(auto|[1-9][0-9]*(:[1-9][0-9]*(,[1-9][0-9]*:[1-9][0-9]*)*)?)$ ]] ;;
+        bits)                           [[ $2 =~ ^(4|16)$ ]] ;;
         lr)                             [[ $2 =~ ^[0-9]+(\.[0-9]+)?(e-?[0-9]+)?$ ]] ;;
         run_name)                       [[ $2 =~ ^[A-Za-z0-9._-]+$ ]] ;;
         torch_index)                    [[ $2 =~ ^(cu[0-9]+|cpu)$ ]] ;;
