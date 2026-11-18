@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.12.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.13.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -277,11 +277,11 @@ model loaded for a run, it trains made-up examples of growing length (1024 token
 GPU memory each took, until one would take more than 90% of what was free; nothing is learned from them. That takes a
 few minutes, the miner log has every length with its memory, and the result is kept in the run's folder
 (`limit-0.json`), so later starts skip it. A rig that still runs out of memory in training lowers its own limit by a
-tenth and starts again. The progress page shows every rig's limit. Examples longer than any rig of the run has been
+quarter and starts again. The progress page shows every rig's limit. Examples longer than any rig of the run has been
 able to take stay in the dataset untrained, and are trained once a rig that can take them joins; over 16384 tokens
 they are left out. A length that the growth so far says would not fit is not tried, so the GPU should not actually run out; if the measuring fails for another reason, the rig says why on the progress page and trains with 2048 until its next start. The measurement counts on the GPU being free of anything else, and has not run on a real GPU yet.
 
-**GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 32 at a time, and in the vocabulary layer's own number format: left to PyTorch's automatic mixed precision, every example first made a 2.4 GB copy of that whole layer. The loss and its gradients are the same. A 4-bit 27B with a rank 16 adapter takes about 20 GB, so a 24 GB card has some 2 GB left for the examples: `lora_r=8` gives it about 1 GB more. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
+**GPU memory.** Beside the model itself (about 16 GB for a 4-bit 27B), the largest cost of an example used to be scoring every position against the vocabulary at once: with Qwen3.8's 248,000 tokens that is some 5 GB per 1000 tokens, and a 24 GB card ran out at 1024. The trainer now scores only the positions that are learned (the answer, not the prompt), 32 at a time, and in the vocabulary layer's own number format: left to PyTorch's automatic mixed precision, every example first made a 2.4 GB copy of that whole layer. The loss and its gradients are the same. Two more things make room without changing what the model computes. The input layer, a second table of the same size that an example reads a few hundred rows of, is kept in the computer's memory instead of the GPU's (2.4 GB of RAM for Qwen3.8, so a rig needs that much to spare). And the weights that are stored as float16 are turned into bfloat16, the format the training computes in, once at the start instead of at every use. A 4-bit 27B with a rank 16 adapter then takes about 18 GB, so a 24 GB card has some 4 GB left for the examples: `lora_r=8` gives it about 1 GB more. A GPU that runs out of memory doesn't always say so: it also shows as a cuBLAS error, which the trainer takes for the same thing. If an example of 128 tokens still doesn't fit, the rig says so on the progress page.
 
 **`speedups=1`.** Three of every four layers of Qwen3.5/3.8 are of a kind (Gated DeltaNet) that the model's library
 runs on plain PyTorch code it calls "correct but much slower" unless the `flash-linear-attention` package is there.

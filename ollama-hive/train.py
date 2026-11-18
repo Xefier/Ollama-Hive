@@ -351,12 +351,16 @@ def example_loss(torch, parts, ids, labels):
     being kept until then."""
     from torch.utils.checkpoint import checkpoint
 
-    body, head = parts
-    hidden = body(input_ids=ids).last_hidden_state[0, :-1]
+    body, head, table = parts
+    kind = next(head.parameters()).dtype
+    if table is None:
+        hidden = body(input_ids=ids).last_hidden_state[0, :-1]
+    else:
+        # The input layer was taken off the GPU (lighten): looked up where it is, and the result brought over
+        looked_up = table(ids.to(table.weight.device)).to(ids.device, kind)
+        hidden = body(inputs_embeds=looked_up).last_hidden_state[0, :-1]
     targets = labels[0, 1:]
     labelled = (targets != -100).nonzero().squeeze(1)
-
-    kind = next(head.parameters()).dtype
 
     def chunk_loss(states, wanted):
         # In the vocabulary layer's own number format, and out of autocast's hands: autocast would first make a copy
@@ -391,21 +395,55 @@ def share_vocabulary(torch, model):
         log(f"The vocabulary layer was a second copy of the input layer: made one of them, {size / 2 ** 30:.1f} GB freed")
 
 
+def lighten(torch, model):
+    """Makes room on the GPU without changing what the model computes. Returns the input layer if it was moved off.
+    - The input layer is a table with a row per token of the vocabulary, 2.4 GB for 250,000, of which an example
+      reads a few hundred rows: it goes to the computer's memory, and only the rows read come back.
+    - Weights stored as float16 become bfloat16, the format the training computes in: left as they are, each is
+      copied into that format every time it is used, the vocabulary layer's 2.4 GB included."""
+    table, head = model.get_input_embeddings(), model.get_output_embeddings()
+    moved = None
+    if head is None or getattr(head, "weight", None) is None or head.weight.data_ptr() != table.weight.data_ptr():
+        table.to("cpu")
+        moved = table
+        torch.cuda.empty_cache()
+    for parameter in model.parameters():
+        if parameter.dtype == torch.float16 and parameter.device.type == "cuda":
+            parameter.data = parameter.data.to(torch.bfloat16)
+    # The 4-bit layers unpack their weights into the format they were saved with, float16 here: the same copying
+    for module in model.modules():
+        if getattr(module, "compute_dtype", None) == torch.float16:
+            module.compute_dtype = torch.bfloat16
+    torch.cuda.empty_cache()
+    return moved
+
+
+def out_of_memory(torch, error):
+    """Whether an error is the GPU running out of memory. Not always said as torch.OutOfMemoryError: the libraries
+    under PyTorch that find no room for their own work say it their own way, as a cuBLAS or cuDNN failure."""
+    text = str(error).lower()
+    return isinstance(error, torch.OutOfMemoryError) or (
+        isinstance(error, RuntimeError) and any(sign in text for sign in ("out of memory", "cublas", "cudnn", "alloc")))
+
+
 def describe_memory(torch, model, parts):
     """A line on what the loaded model's GPU memory is made of, for whoever has to find room."""
     sizes = {}
     seen = set()
     for tensor in [*model.parameters(), *model.buffers()]:
-        if tensor.data_ptr() not in seen:
+        if tensor.device.type == "cuda" and tensor.data_ptr() not in seen:
             seen.add(tensor.data_ptr())
             name = "4-bit weights" if tensor.dtype == torch.uint8 else f"{str(tensor.dtype).replace('torch.', '')} weights"
             sizes[name] = sizes.get(name, 0) + tensor.numel() * tensor.element_size()
     text = ", ".join(f"{size / 2 ** 30:.1f} GB of {name}" for name, size in sorted(sizes.items(), key=lambda item: -item[1]))
     if parts:
         weight = next(parts[1].parameters())
-        shared = weight.data_ptr() == model.get_input_embeddings().weight.data_ptr()
+        table = model.get_input_embeddings().weight
+        where = ("shared with the input layer" if weight.data_ptr() == table.data_ptr() else
+                 "the input layer is as much again and in the computer's memory" if table.device.type == "cpu" else
+                 "the input layer is as much again")
         text += (f"; the vocabulary layer is {weight.numel() * weight.element_size() / 2 ** 30:.1f} GB of that in "
-                 f"{str(weight.dtype).replace('torch.', '')}, {'shared' if shared else 'NOT shared'} with the input layer")
+                 f"{str(weight.dtype).replace('torch.', '')}, {where}")
     return text
 
 
@@ -431,8 +469,7 @@ def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say, t
             loss.backward()
             peak = torch.cuda.max_memory_allocated(device)
         except RuntimeError as error:
-            # Not always as torch.OutOfMemoryError: the libraries under PyTorch have their own ways of saying it
-            if not isinstance(error, torch.OutOfMemoryError) and "memory" not in str(error).lower():
+            if not out_of_memory(torch, error):
                 raise
             log(f"  {str(error).splitlines()[0][:300]}")
             # Where it asked for the memory: the innermost places in the code
@@ -542,8 +579,8 @@ def own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank,
 
 
 def lower_auto_limit(torch, args, device, local_rank, limit):
-    """After running out of memory at this GPU's limit under max_len=auto: the next start takes a tenth less."""
-    lowered = int(limit * 0.9)
+    """After running out of memory at this GPU's limit under max_len=auto: the next start takes a quarter less."""
+    lowered = int(limit * 0.75)
     write_line(limit_path(args, local_rank), json.dumps({"gpu": gpu_name(torch, device), "limit": lowered}))
     return lowered
 
@@ -818,6 +855,7 @@ def main(args):
     model = load_model(torch, args, device, cuda)
     if cuda:
         share_vocabulary(torch, model)
+    table = lighten(torch, model) if cuda else None
     memory["model"] = in_use()
     model = add_adapter(torch, model, args)
     memory["adapter"] = in_use() - memory["model"]
@@ -851,6 +889,11 @@ def main(args):
     # Before any measuring: only a model that is training saves memory by recomputing its activations
     model.train()
     parts = split_model(model)
+    if parts:
+        parts = (*parts, table)
+    elif table is not None:
+        # The model's own forward looks the tokens up on the GPU
+        table.to(device)
     if cuda:
         log(f"On the GPU: {describe_memory(torch, model, parts)}")
     if not parts:
@@ -1056,17 +1099,19 @@ def main(args):
                 write_line(args.status_file, f"{status}, {rigs}")
             if steps_done % args.save_steps == 0:
                 save()
-    except torch.OutOfMemoryError:
+    except Exception as error:
+        if not out_of_memory(torch, error):
+            # Usually a rig that vanished mid-step. The adapter is still as the last whole step left it.
+            save()
+            raise
+        traceback.print_exc()
         tell_memory()
         if writer:
             write_line(args.status_file, "out of GPU memory: lower max_len")
         lowered = lower_auto_limit(torch, args, device, local_rank, own_limit) if args.max_len == AUTO else None
         sys.exit(f"Out of GPU memory with examples up to {own_limit} tokens on {gpu_gb} GB (max_len={args.max_len}): "
-                 + (f"taking {lowered} from the next start" if lowered else "lower the limit for this GPU, or lora_r"))
-    except Exception:
-        # Usually a rig that vanished mid-step. The adapter is still as the last whole step left it.
-        save()
-        raise
+                 + (f"taking {lowered} from the next start" if lowered else "lower the limit for this GPU, or lora_r")
+                 + f" ({str(error).splitlines()[0][:160]})")
 
     save()
     note("stop")
