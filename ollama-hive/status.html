@@ -183,7 +183,7 @@ $("rigs").onclick = event => {
 
 // What a rig's GPUs are doing, from nvidia-smi (name, MiB used, MiB in all, % busy, degrees, watts), and what holds
 // their memory: this miner's processes, every other process by name, and what no process is listed for
-function gpuLines(status) {
+function gpuLines(status, fullest) {
   const gb = mib => `${(mib / 1024).toFixed(1)} GB`;
   // The program and what it runs, without the folders: enough to tell what a process is
   const short = command => command.split(" ").slice(0, 3).map(word => word.split("/").pop()).join(" ");
@@ -210,7 +210,10 @@ function gpuLines(status) {
     };
     const pieces = ours.flatMap(split);
     const line = (color, text) => `<i class="key ${color ? "" : "free"}" style="${color ? `background:${color}` : ""}"></i>${text}`;
-    return `<br>${escaped(name.replace(/^NVIDIA (GeForce )?/, ""))}: ${gb(used)} of ${gb(total)} in use · ${busy}% busy · ${degrees}°C · ${Math.round(watts)} W
+    // fullest: an earlier look, kept for when the miner is no longer on the GPU to be looked at
+    if (fullest && !ours.length) return "";
+    return (fullest ? `<br><b>When the miner last held the most, at ${fullTime(status.at)}:</b> ${gb(used)} of ${gb(total)} in use`
+      : `<br>${escaped(name.replace(/^NVIDIA (GeForce )?/, ""))}: ${gb(used)} of ${gb(total)} in use · ${busy}% busy · ${degrees}°C · ${Math.round(watts)} W`) + `
       <div class="memory" title="GPU memory">${pieces.map(piece => part(piece.mib, piece.color)).join("")}${others.map(process => part(process.mib, "var(--warning)")).join("")}${part(unlisted, "var(--idle)")}${part(free, "transparent")}</div>`
       + [...pieces.map(piece => line(piece.color, `${gb(piece.mib)} ${piece.text}`)),
          ...others.map(process => line("var(--warning)", `${gb(process.mib)} something else: <span title="${escaped(process.command)}">${escaped(short(process.command))}</span> (process ${escaped(process.pid)})`)),
@@ -519,6 +522,9 @@ function render() {
       + (problem ? `<br><span class="problem">${levelMark(LEVELS[0], `Not training: failed ${problem.failures > 1 ? problem.failures + " times in a row" : "to start"}, last at ${fullTime(problem.at)}`)}<br>${escaped(problem.error)}</span>` : "")
       + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "")
       + (rig.status ? gpuLines(rig.status) : "")
+      // What a failed attempt looked like, since it is off the GPU before anyone can look
+      + (rig.status && rig.status.fullest && (problem || !(rig.status.processes || []).some(process => process.ours && process.mib))
+        ? gpuLines(rig.status.fullest, true) : "")
       + (rig.status && rig.status.log ? `<br><button data-log="${address}">Miner log</button>` : "");
     return `<div class="rig ${problem ? "bad" : ""}"><i class="dot ${problem ? "bad" : state === "training" ? "on" : rig.status ? "" : "off"}"></i><b>${address}</b><br><span>${text}</span></div>`;
   }).join("");

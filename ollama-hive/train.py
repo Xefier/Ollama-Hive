@@ -67,7 +67,7 @@ AUTO_STRIDE = 1024  # tokens between the lengths tried
 AUTO_USE = 0.9      # the part of the free GPU memory an example may take: the rest is for what moves around
 # Positions of an example scored against the vocabulary in one go. All at once is what the model's own loss does, and
 # with a vocabulary of 250,000 that takes some 5 GB per 1000 tokens, more than the rest of the model's work together.
-LOSS_CHUNK = 128
+LOSS_CHUNK = 32
 
 
 def parse_args():
@@ -356,8 +356,13 @@ def example_loss(torch, parts, ids, labels):
     targets = labels[0, 1:]
     labelled = (targets != -100).nonzero().squeeze(1)
 
+    kind = next(head.parameters()).dtype
+
     def chunk_loss(states, wanted):
-        return torch.nn.functional.cross_entropy(head(states).float(), wanted, reduction="sum")
+        # In the vocabulary layer's own number format, and out of autocast's hands: autocast would first make a copy
+        # of the whole layer in its format, 2.4 GB for a vocabulary of 250,000, however short the example
+        with torch.autocast(states.device.type, enabled=False):
+            return torch.nn.functional.cross_entropy(head(states.to(kind)).float(), wanted, reduction="sum")
 
     total = hidden.new_zeros((), dtype=torch.float32)
     for start in range(0, len(labelled), LOSS_CHUNK):
@@ -366,10 +371,48 @@ def example_loss(torch, parts, ids, labels):
     return total / max(1, len(labelled))
 
 
-def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say):
+def share_vocabulary(torch, model):
+    """Makes the vocabulary layer and the input layer one again where they hold the same numbers twice: they are
+    one table by design, 2.4 GB for a vocabulary of 250,000, and loading can leave two copies. Neither is trained."""
+    parts = split_model(model)
+    if not parts or not hasattr(parts[1], "weight"):
+        return
+    head, table = parts[1], model.get_input_embeddings()
+    if (head.weight.data_ptr() == table.weight.data_ptr() or head.weight.shape != table.weight.shape
+            or head.weight.dtype != table.weight.dtype or head.weight.device != table.weight.device):
+        return
+    # Compared a piece at a time: all at once would take a third copy's worth of memory
+    rows = 4096
+    if all(torch.equal(head.weight[start:start + rows], table.weight[start:start + rows])
+           for start in range(0, head.weight.shape[0], rows)):
+        size = head.weight.numel() * head.weight.element_size()
+        head.weight = table.weight
+        torch.cuda.empty_cache()
+        log(f"The vocabulary layer was a second copy of the input layer: made one of them, {size / 2 ** 30:.1f} GB freed")
+
+
+def describe_memory(torch, model, parts):
+    """A line on what the loaded model's GPU memory is made of, for whoever has to find room."""
+    sizes = {}
+    seen = set()
+    for tensor in [*model.parameters(), *model.buffers()]:
+        if tensor.data_ptr() not in seen:
+            seen.add(tensor.data_ptr())
+            name = "4-bit weights" if tensor.dtype == torch.uint8 else f"{str(tensor.dtype).replace('torch.', '')} weights"
+            sizes[name] = sizes.get(name, 0) + tensor.numel() * tensor.element_size()
+    text = ", ".join(f"{size / 2 ** 30:.1f} GB of {name}" for name, size in sorted(sizes.items(), key=lambda item: -item[1]))
+    if parts:
+        weight = next(parts[1].parameters())
+        shared = weight.data_ptr() == model.get_input_embeddings().weight.data_ptr()
+        text += (f"; the vocabulary layer is {weight.numel() * weight.element_size() / 2 ** 30:.1f} GB of that in "
+                 f"{str(weight.dtype).replace('torch.', '')}, {'shared' if shared else 'NOT shared'} with the input layer")
+    return text
+
+
+def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say, tried):
     """The longest example this GPU can train with the model as loaded: see find_limit. Nothing is learned from the
     made-up examples. loss_of: the loss of an example, as the training works it out. reserve: bytes the training
-    will take that aren't taken yet. say: where to tell how it is going."""
+    will take that aren't taken yet. say: where to tell how it is going. tried: called after every length."""
     import gc
 
     torch.cuda.empty_cache()
@@ -392,6 +435,9 @@ def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say):
             if not isinstance(error, torch.OutOfMemoryError) and "memory" not in str(error).lower():
                 raise
             log(f"  {str(error).splitlines()[0][:300]}")
+            # Where it asked for the memory: the innermost places in the code
+            log("  at " + " < ".join(f"{os.path.basename(frame.filename)}:{frame.lineno} {frame.name}"
+                                    for frame in reversed(traceback.extract_tb(error.__traceback__)[-4:])))
             peak = None
         ids = loss = None
         for parameter in parameters:
@@ -400,6 +446,7 @@ def measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say):
         gc.collect()
         torch.cuda.empty_cache()
         say(f"measuring: {length} tokens " + ("ran out of memory" if peak is None else f"take {peak / 2 ** 30:.1f} GB"))
+        tried(length)
         return peak
 
     log(f"The model takes {in_use / 2 ** 30:.1f} GB and {free / 2 ** 30:.1f} GB is free, of which "
@@ -457,7 +504,7 @@ def limit_path(args, local_rank):
     return os.path.join(args.run_dir, f"limit-{local_rank}.json")
 
 
-def own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer, loss_of, reserve):
+def own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer, loss_of, reserve, tried):
     """This GPU's limit under max_len=auto: measured once per run and GPU, and kept in the run's folder."""
     if args.limit is not None:
         return args.limit
@@ -480,7 +527,7 @@ def own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank,
     if writer:
         write_line(args.state_file, "measuring")
     try:
-        limit = measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say)
+        limit = measure_limit(torch, tokenizer, parameters, device, loss_of, reserve, say, tried)
     except Exception as error:
         # Training goes on at the usual limit rather than not at all, and the next start measures again
         traceback.print_exc()
@@ -769,12 +816,15 @@ def main(args):
         torch.cuda.reset_peak_memory_stats(device)
 
     model = load_model(torch, args, device, cuda)
+    if cuda:
+        share_vocabulary(torch, model)
     memory["model"] = in_use()
     model = add_adapter(torch, model, args)
     memory["adapter"] = in_use() - memory["model"]
     named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
     parameters = [p for _, p in named]
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=0.0)
+    tell_memory()
     seen = 0
     counts = {}  # times each example has been trained, by key
     reached = 0  # the longest example any rig of the run could take so far
@@ -801,6 +851,8 @@ def main(args):
     # Before any measuring: only a model that is training saves memory by recomputing its activations
     model.train()
     parts = split_model(model)
+    if cuda:
+        log(f"On the GPU: {describe_memory(torch, model, parts)}")
     if not parts:
         log("This model doesn't come apart into a body and a vocabulary layer: its own loss is used, on more memory")
 
@@ -814,7 +866,7 @@ def main(args):
         weights = sum(parameter.numel() for parameter in parameters) * 4
         reserve = (0 if optimizer.state else 2 * weights) + min(weights, BUCKET * 4)
         own_limit = own_auto_limit(torch, args, tokenizer, parameters, device, cuda, local_rank, writer,
-                                   loss_of, reserve)
+                                   loss_of, reserve, tell_memory)
     else:
         own_limit = limit_for(parse_limits(args.max_len), gpu_gb)
     limits = [int(limit) for limit in share(dist, torch, device, rank, world, own_limit)]
@@ -1005,6 +1057,7 @@ def main(args):
             if steps_done % args.save_steps == 0:
                 save()
     except torch.OutOfMemoryError:
+        tell_memory()
         if writer:
             write_line(args.status_file, "out of GPU memory: lower max_len")
         lowered = lower_auto_limit(torch, args, device, local_rank, own_limit) if args.max_len == AUTO else None

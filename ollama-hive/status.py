@@ -7,7 +7,8 @@ rented doesn't answer and shows as away.
 
   /          the page
   /status    what this rig is doing now, what stops it if something does (problem.py), its GPUs and what is using
-             their memory, and the addresses of the rigs of the run that it has heard (meet.py)
+             their memory, now and when the miner had the most of it lately, and the addresses of the rigs of the
+             run that it has heard (meet.py)
   /history   the lines train.py wrote since byte ?from=, for a page that keeps asking
   /log       the end of the miner log, for finding out from another PC why a rig isn't training
 
@@ -20,6 +21,7 @@ import http.server
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.parse
 
@@ -59,7 +61,11 @@ def end_of(path, length):
 GPU_FIELDS = "name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw,uuid"
 PROCESS_FIELDS = "gpu_uuid,pid,used_memory,process_name"
 OURS = "ollama-hive"  # in the command line of everything this miner runs: its folder, and its data folder
-gpus_asked = [0, [], []]  # when, and the answers: several pages open don't each start nvidia-smi
+LOOK_EVERY = 3            # seconds between looks at the GPUs
+FULLEST_FOR = 30 * 60     # how long the look with the most of this miner on the GPUs is kept
+# The latest look at the GPUs, and the one where this miner held the most memory: an attempt that fails is gone from
+# the GPU within seconds, and what it looked like at its fullest is what says why
+looks = {"now": {"at": 0, "gpus": [], "processes": [], "memory": []}, "fullest": None}
 
 
 def nvidia_smi(query, fields):
@@ -80,22 +86,33 @@ def command_of(pid, otherwise):
         return otherwise
 
 
-def gpus():
-    """A line per GPU as nvidia-smi gives it (name, MiB used, MiB in all, % busy, degrees, watts, id), and the
-    processes computing on them: which GPU, the process, its MiB, what it is, and whether this miner runs it. The
-    display server and the like hold GPU memory without being listed, so the processes need not add up."""
-    if time.time() - gpus_asked[0] > 5:
-        gpus_asked[1] = nvidia_smi("gpu", GPU_FIELDS)
-        ids = [gpu[-1] for gpu in gpus_asked[1]]
-        processes = []
-        for gpu, pid, used, name in (row for row in nvidia_smi("compute-apps", PROCESS_FIELDS) if len(row) == 4):
-            command = command_of(pid, name)
-            processes.append({"gpu": ids.index(gpu) if gpu in ids else 0, "pid": pid,
-                              "mib": int(used) if used.isdigit() else None,
-                              "command": command[:300], "ours": OURS in command})
-        gpus_asked[2] = processes
-        gpus_asked[0] = time.time()
-    return gpus_asked[1], gpus_asked[2]
+def look(memory_file):
+    """gpus: a line per GPU as nvidia-smi gives it (name, MiB used, MiB in all, % busy, degrees, watts, id).
+    processes: those computing on them: which GPU, the process, its MiB, what it is, and whether this miner runs
+    it. The display server and the like hold GPU memory without being listed, so the processes need not add up.
+    memory: what this miner's workers say theirs goes to."""
+    cards = nvidia_smi("gpu", GPU_FIELDS)
+    ids = [gpu[-1] for gpu in cards]
+    processes = []
+    for gpu, pid, used, name in (row for row in nvidia_smi("compute-apps", PROCESS_FIELDS) if len(row) == 4):
+        command = command_of(pid, name)
+        processes.append({"gpu": ids.index(gpu) if gpu in ids else 0, "pid": pid,
+                          "mib": int(used) if used.isdigit() else None,
+                          "command": command[:300], "ours": OURS in command})
+    return {"at": round(time.time()), "gpus": cards, "processes": processes, "memory": memory_reports(memory_file)}
+
+
+def ours_in(seen):
+    return sum(process["mib"] or 0 for process in seen["processes"] if process["ours"])
+
+
+def keep_looking(memory_file):
+    while True:
+        seen = looks["now"] = look(memory_file)
+        fullest = looks["fullest"]
+        if ours_in(seen) and (not fullest or ours_in(seen) >= ours_in(fullest) or seen["at"] - fullest["at"] > FULLEST_FOR):
+            looks["fullest"] = seen
+        time.sleep(LOOK_EVERY)
 
 
 def memory_reports(prefix):
@@ -163,12 +180,12 @@ def main():
                 with open(os.path.join(HERE, "status.html"), "rb") as handle:
                     self.send(handle.read(), "text/html; charset=utf-8")
             elif url.path == "/status":
-                cards, processes = gpus()
+                seen = looks["now"]
                 self.send_json({"address": args.me, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
                                 "state": read_line(args.state_file), "status": read_line(args.status_file),
-                                "problem": problem.read(args.problem_file), "gpus": cards, "processes": processes,
-                                "memory": memory_reports(args.memory_file),
+                                "problem": problem.read(args.problem_file), "gpus": seen["gpus"], "processes": seen["processes"],
+                                "memory": seen["memory"], "fullest": looks["fullest"],
                                 "log": bool(args.log_file)})
             elif url.path == "/history":
                 query = urllib.parse.parse_qs(url.query)
@@ -185,6 +202,7 @@ def main():
         def log_message(self, *_):
             pass  # a request every few seconds per open page would fill the miner log
 
+    threading.Thread(target=keep_looking, args=(args.memory_file,), daemon=True).start()
     http.server.ThreadingHTTPServer.daemon_threads = True
     try:
         server = http.server.ThreadingHTTPServer((args.me, args.port), Handler)
