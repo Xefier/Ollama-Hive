@@ -9,6 +9,13 @@
 OH_STOCK_MODEL=$OH_MODEL
 OH_CONVERT_DIR="$OH_TRAIN_DIR/convert"
 OH_EXPORT_WORK="$OH_RUN_PATH/export"
+# Where the progress page reads how the export is going: the flight sheet's status line, unless export-run.sh,
+# which runs beside a flight sheet that has its own, names another
+OH_EXPORT_STATUS_FILE="$OH_RUN_DIR/train-status"
+
+export_says() {
+    echo "$1" > "$OH_EXPORT_STATUS_FILE"
+}
 
 find_export_settings_problem() {
     [[ -n $OH_STOCK_MODEL ]] || { echo "No model set: add model=<the stock Ollama model the run was trained from>"; return; }
@@ -35,6 +42,7 @@ install_export_tools() {
     [[ -f $stamp && -x $OH_QUANTIZE ]] && return 0
 
     oh_set_state installing
+    export_says "installing llama.cpp, which converts the model"
     install_uv || return 1
     log "Installing llama.cpp $OH_LLAMA_CPP: the GGUF converter and llama-quantize"
     local release="https://github.com/ggml-org/llama.cpp"
@@ -100,10 +108,12 @@ export_model() {
         if [[ ! -f $full ]]; then
             [[ -d $merged ]] || export_has_space || return 1
             oh_set_state merging
+            export_says "step 1 of 4: adding the adapter to the base model's weights"
             log "Merging the adapter of run $OH_RUN_NAME into $OH_FULL_BASE"
             export_step "$OH_CONVERT_PYTHON" "$OH_DIR/export.py" merge \
-                --adapter "$adapter" --base "$OH_FULL_BASE" --out "$merged" || return 1
+                --adapter "$adapter" --base "$OH_FULL_BASE" --out "$merged" --status-file "$OH_EXPORT_STATUS_FILE" || return 1
             oh_set_state converting
+            export_says "step 2 of 4: converting to the format Ollama reads"
             log "Converting to GGUF"
             if [[ $direct == 1 ]]; then
                 export_step "$OH_CONVERT_PYTHON" "$OH_CONVERT_SCRIPT" "$merged" --outfile "$final.tmp" --outtype q8_0 || return 1
@@ -116,6 +126,7 @@ export_model() {
         rm -rf "$merged"
         if [[ $direct != 1 ]]; then
             oh_set_state quantizing
+            export_says "step 3 of 4: quantizing to $OH_QUANT"
             log "Quantizing to $OH_QUANT"
             LD_LIBRARY_PATH="$(dirname "$OH_QUANTIZE")" export_step "$OH_QUANTIZE" "$full" "$final.tmp" "$OH_QUANT" || return 1
             mv "$final.tmp" "$final"
@@ -124,6 +135,7 @@ export_model() {
     fi
 
     oh_set_state importing
+    export_says "step 4 of 4: handing $OH_EXPORT_NAME to Ollama"
     if ! "$OH_BIN" show "$OH_STOCK_MODEL" >/dev/null 2>&1; then
         log "Pulling $OH_STOCK_MODEL for its Modelfile and vision projector"
         export_step "$OH_BIN" pull "$OH_STOCK_MODEL" || return 1
@@ -135,5 +147,7 @@ export_model() {
     export_step "$OH_BIN" create "$OH_EXPORT_NAME" -f "$OH_EXPORT_WORK/Modelfile" || return 1
     # Ollama has its own copy now
     rm -rf "$OH_EXPORT_WORK"
+    rm -f "$OH_EXPORT_STATUS_FILE"
     notify info "$OH_EXPORT_NAME is made from run $OH_RUN_NAME. model=$OH_EXPORT_NAME serves it without mode=export too"
+    return 0
 }

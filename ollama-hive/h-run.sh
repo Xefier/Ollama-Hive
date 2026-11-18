@@ -6,22 +6,12 @@
 
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 . ./h-common.sh
+. ./h-log.sh
 . ./h-train.sh
 . ./h-export.sh
 
-LOG_FILE="$CUSTOM_LOG_BASENAME.log"
 mkdir -p "$CUSTOM_LOG_BASEDIR" "$OH_RUN_DIR"
 touch "$LOG_FILE"
-
-log() {
-    echo "[ollama-hive] $(date '+%F %T') $*" | tee -a "$LOG_FILE"
-}
-
-# Shows on the Hive dashboard
-notify() {
-    log "$2"
-    command -v message >/dev/null 2>&1 && message "$1" "ollama-hive: $2" >/dev/null 2>&1
-}
 
 on_stop() {
     trap '' INT TERM HUP
@@ -31,12 +21,6 @@ on_stop() {
     exit 0
 }
 trap on_stop INT TERM HUP
-
-# Sleeps in a way a stop signal interrupts at once
-pause() {
-    sleep "$1" &
-    wait $!
-}
 
 # A previous run that died without cleaning up
 if [[ -f $OH_RUN_DIR/guard.pid ]]; then
@@ -328,6 +312,8 @@ echo "$!" > "$OH_RUN_DIR/tail.pid"
 # Never returns
 [[ $OH_MODE == train ]] && train_loop
 
+rm -f "$OH_PROBLEM_FILE" "$OH_MEMORY_FILE"-*
+start_status_page
 export_told=""
 while true; do
     oh_set_state starting
@@ -343,6 +329,7 @@ while true; do
                 export_told=1
             fi
             oh_set_state waiting
+            echo "could not make $OH_EXPORT_NAME: trying again every 5 minutes, the miner log says why" > "$OH_RUN_DIR/train-status"
             pause 300
             continue
         fi

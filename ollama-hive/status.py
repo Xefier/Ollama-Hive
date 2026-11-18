@@ -11,6 +11,8 @@ rented doesn't answer and shows as away.
              run that it has heard (meet.py)
   /history   the lines train.py wrote since byte ?from=, for a page that keeps asking
   /log       the end of the miner log, for finding out from another PC why a rig isn't training
+  /adapter   what this rig has of the run's adapter, and /adapter/<file> each of its files: export-run.sh on a rig
+             that serves fetches it here, to make the model the run has trained so far
 
 Read-only, and anything that can reach the port can read it. Standard library only.
 """
@@ -20,6 +22,8 @@ import glob
 import http.server
 import json
 import os
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -127,6 +131,24 @@ def memory_reports(prefix):
     return reports
 
 
+def adapter_listing(run_dir, run_name, full_base):
+    """The adapter as lines of text, which a shell script reads easily: the run, the full-precision base if the
+    flight sheet names it, the examples it was trained on, and a line per file with its size. None without one."""
+    folder = os.path.join(run_dir, "adapter")
+    seen = read_line(os.path.join(folder, "examples-seen"))
+    if not seen:
+        return None
+    lines = [f"run {run_name}"] + ([f"full_base {full_base}"] if full_base else []) + [f"seen {seen}"]
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path) and ADAPTER_FILE.match(name):
+            lines.append(f"file {name} {os.path.getsize(path)}")
+    return "\n".join(lines) + "\n"
+
+
+ADAPTER_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # a name in the adapter's folder, and nothing above it
+
+
 def history_since(path, start):
     """The whole lines after byte start, and where the next call should start. From 0 again when the file is
     shorter than start: the run folder was started anew."""
@@ -158,6 +180,9 @@ def main():
     parser.add_argument("--log-file", default="")
     parser.add_argument("--problem-file", default="")
     parser.add_argument("--memory-file", default="")
+    parser.add_argument("--full-base", default="")
+    parser.add_argument("--mode", default="train", help="the flight sheet's: train, serve or export")
+    parser.add_argument("--export-files", default="", help="export-run.sh's state and status files, less -state and -status")
     args = parser.parse_args()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -181,7 +206,10 @@ def main():
                     self.send(handle.read(), "text/html; charset=utf-8")
             elif url.path == "/status":
                 seen = looks["now"]
-                self.send_json({"address": args.me, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
+                exporting = read_line(args.export_files + "-state") if args.export_files else ""
+                self.send_json({"address": args.me, "mode": args.mode,
+                                "export": {"state": exporting, "status": read_line(args.export_files + "-status")}
+                                if exporting else None, "port": args.port, "rigs": rigs_heard(args.rigs_file, args.me),
                                 "run": args.run_name, "version": args.version, "time": round(time.time()),
                                 "state": read_line(args.state_file), "status": read_line(args.status_file),
                                 "problem": problem.read(args.problem_file), "gpus": seen["gpus"], "processes": seen["processes"],
@@ -194,6 +222,23 @@ def main():
                 except ValueError:
                     start = 0
                 self.send_json(history_since(os.path.join(args.run_dir, "history.jsonl"), start))
+            elif url.path == "/adapter":
+                listing = adapter_listing(args.run_dir, args.run_name, args.full_base)
+                if listing is None:
+                    self.send_error(404, "No adapter yet: this rig has not trained a step of the run")
+                else:
+                    self.send(listing.encode(), "text/plain; charset=utf-8")
+            elif url.path.startswith("/adapter/") and ADAPTER_FILE.match(url.path[len("/adapter/"):]):
+                try:
+                    with open(os.path.join(args.run_dir, "adapter", url.path[len("/adapter/"):]), "rb") as handle:
+                        # Hundreds of MB: passed on as it is read
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Length", str(os.fstat(handle.fileno()).st_size))
+                        self.end_headers()
+                        shutil.copyfileobj(handle, self.wfile, 1024 * 1024)
+                except OSError:
+                    self.send_error(404)
             elif url.path == "/log" and args.log_file:
                 self.send(end_of(args.log_file, LOG_END), "text/plain; charset=utf-8")
             else:

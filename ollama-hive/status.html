@@ -38,6 +38,7 @@ h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .dot.on { background: var(--series); }
 .dot.off { background: none; border: 1px solid var(--muted); }
 .dot.bad { background: var(--critical); }
+.no-training .training-only { display: none; }
 .memory { display: flex; height: 10px; margin: 4px 0 2px; border: 1px solid var(--axis); border-radius: 3px; overflow: hidden; gap: 1px; }
 .memory i { min-width: 2px; }
 .key { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
@@ -155,6 +156,23 @@ function addRigs(addresses) {
   for (const address of addresses) {
     if (address && !rigs.has(address)) rigs.set(address, { next: 0, lines: [], status: null });
   }
+}
+
+// Everything but the rigs and the log is about a training run: left out while no rig trains and none has
+for (const part of document.querySelectorAll("#tiles, .card:not(#log-card)")) part.classList.add("training-only");
+
+function lasting(seconds) {
+  const minutes = Math.round(seconds / 60);
+  return seconds < 90 ? `${Math.round(seconds)} s` : minutes < 90 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+// The latest stretch of steps without a long gap: how long the training took, or has been going
+function lastStretch(steps, pace) {
+  if (!steps.length) return null;
+  let first = steps.length - 1;
+  while (first > 0 && steps[first].t - steps[first - 1].t < AWAY_AFTER) first -= 1;
+  // The first step's own time isn't between two steps: taken as a usual one
+  return { seconds: steps[steps.length - 1].t - steps[first].t + pace, steps: steps.length - first, ended: steps[steps.length - 1].t };
 }
 
 const escaped = text => String(text).replace(/[&<>"]/g, sign => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[sign]);
@@ -509,16 +527,20 @@ function render() {
   const lines = linesByTime();
   const answering = [...rigs.values()].filter(rig => rig.status);
   const run = answering.length ? answering[0].status.run : "";
-  $("sub").textContent = rigs.size ? `Run ${run || "?"} · ${answering.length} of ${rigs.size} rigs on the training flight sheet · updated ${new Date().toLocaleTimeString("en-GB")}`
-    : "No rig answers. Open this page from a rig that is on the training flight sheet.";
+  $("sub").textContent = rigs.size ? `Run ${run || "?"} · ${answering.length} of ${rigs.size} rigs answering · updated ${new Date().toLocaleTimeString("en-GB")}`
+    : "No rig answers. Open this page from a rig that has this miner's flight sheet.";
 
   $("rigs").innerHTML = [...rigs].map(([address, rig]) => {
     const state = rig.status ? rig.status.state : "";
     // lim: the longest example the rig takes, on every line it writes
     const limit = rig.lines.length ? rig.lines[rig.lines.length - 1].lim : undefined;
     const problem = rig.status && rig.status.problem;
+    // mode: the flight sheet's. A rig that serves or exports is no part of the training, and says so.
+    const doing = rig.status && rig.status.mode && rig.status.mode !== "train" ? `${rig.status.mode === "export" ? "making a model, then serving it" : "serving"}: ` : "";
+    const making = rig.status && rig.status.export;
     const text = (!rig.status ? "Not answering: rented, off, or on another flight sheet"
-      : `${escaped(state || "starting")}${rig.status.status ? " · " + escaped(rig.status.status) : ""}`)
+      : `${doing}${escaped(state || "starting")}${rig.status.status ? " · " + escaped(rig.status.status) : ""}`)
+      + (making ? `<br>Making a model beside it (export-run): ${escaped(making.state)}${making.status ? " · " + escaped(making.status) : ""}` : "")
       + (problem ? `<br><span class="problem">${levelMark(LEVELS[0], `Not training: failed ${problem.failures > 1 ? problem.failures + " times in a row" : "to start"}, last at ${fullTime(problem.at)}`)}<br>${escaped(problem.error)}</span>` : "")
       + (limit ? `<br>takes examples up to ${number(limit)} tokens` : "")
       + (rig.status ? gpuLines(rig.status) : "")
@@ -547,6 +569,13 @@ function render() {
     ["Rigs training now", `${answering.filter(rig => rig.status.state === "training").length} of ${rigs.size}`],
     ["Step time spent waiting for each other", waitingOverall()],
   ];
+  const training = answering.some(rig => rig.status.state === "training");
+  const stretch = lastStretch(steps, pace);
+  if (stretch) {
+    tiles.splice(5, 0, [training ? "Training for" : "The last training took",
+      `${lasting(stretch.seconds)}<div class="label">${number(stretch.steps)} step${stretch.steps > 1 ? "s" : ""}${training ? "" : ` · ended ${fullTime(stretch.ended)}`}</div>`]);
+  }
+  document.body.classList.toggle("no-training", !steps.length && !answering.some(rig => !rig.status.mode || rig.status.mode === "train"));
   $("tiles").innerHTML = tiles.map(([label, value]) => `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`).join("");
 
   $("verdicts").innerHTML = verdicts();

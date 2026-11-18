@@ -23,6 +23,16 @@ pkill -KILL -f "^$OH_BIN( |$)" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/lib/ollama" 2>/dev/null
 pkill -KILL -f "$OH_DATA_DIR/ollama-download" 2>/dev/null
 # A training run or an export, or the install of their tools (uv, the venvs' python, the workers, llama.cpp)
+if [[ -f $OH_RUN_DIR/status.pid ]]; then
+    kill "$(< "$OH_RUN_DIR/status.pid")" 2>/dev/null
+    rm -f "$OH_RUN_DIR/status.pid"
+fi
+rm -f "$OH_RUN_DIR/train-status"
+if [[ -f $OH_RUN_DIR/export-run.pid ]]; then
+    # export-run.sh, before the step it is on (below)
+    kill -KILL -- "-$(< "$OH_RUN_DIR/export-run.pid")" 2>/dev/null
+    rm -f "$OH_RUN_DIR/export-run.pid"
+fi
 if [[ -f $OH_RUN_DIR/export.pid ]]; then
     kill -KILL -- "-$(< "$OH_RUN_DIR/export.pid")" 2>/dev/null
     rm -f "$OH_RUN_DIR/export.pid"

@@ -141,18 +141,22 @@ train_once() {
     wait "$SERVER_PID"
 }
 
-# The progress page and this rig's part of its data, for as long as the flight sheet runs. h-stop.sh ends it with
-# everything else that runs from the training environment.
+# The progress page and this rig's part of its data, for as long as the flight sheet runs, whatever its mode: what
+# the rig is doing, its GPU memory and the miner log are worth seeing while it serves or exports too. h-stop.sh ends
+# it. It needs no package, so a rig that never trained runs it on the system's Python.
 start_status_page() {
-    local address
+    local address python="$OH_VENV/bin/python"
     address=$(oh_lan_address)
     [[ -n $address ]] || return
+    [[ -x $python ]] || python=$(command -v python3) || { log "No Python on this rig for the progress page"; return; }
     mkdir -p "$OH_RUN_PATH"
-    "$OH_VENV/bin/python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
-        --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" \
+    "$python" "$OH_DIR/status.py" --me "$address" --port "$OH_STATUS_PORT" --rigs-file "$OH_RIGS_FILE" \
+        --run-dir "$OH_RUN_PATH" --run-name "$OH_RUN_NAME" --version "${CUSTOM_VERSION:-}" --mode "$OH_MODE" \
         --state-file "$OH_RUN_DIR/state" --status-file "$OH_RUN_DIR/train-status" --log-file "$LOG_FILE" \
-        --problem-file "$OH_PROBLEM_FILE" --memory-file "$OH_MEMORY_FILE" \
+        --problem-file "$OH_PROBLEM_FILE" --memory-file "$OH_MEMORY_FILE" --full-base "$OH_FULL_BASE" \
+        --export-files "$OH_RUN_DIR/export" \
         >> "$LOG_FILE" 2>&1 &
+    echo "$!" > "$OH_RUN_DIR/status.pid"
     log "Progress page: http://$address:$OH_STATUS_PORT/"
 }
 

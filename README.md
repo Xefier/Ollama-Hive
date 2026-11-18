@@ -10,7 +10,7 @@ flight sheet active it isn't running and holds no GPU memory.
 
 ## Flight sheet
 
-Host `ollama-hive-v0.14.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
+Host `ollama-hive-v0.15.tar.gz` somewhere the rigs can download it (a GitHub release, like the other miners), then make a
 flight sheet with miner **Custom**:
 
 - **Miner name:** `ollama-hive`
@@ -295,10 +295,12 @@ the library asks for, `causal-conv1d`, is not installed: it needs a CUDA compile
 **Dashboard:** 1 H/s per GPU while training and 0 while waiting, with the progress in the algo field (`qlora training
 step 120, 780 to go loss 1.234`). The loss in each rig's log is over that rig's examples only.
 
-**Progress page.** Every rig on the training flight sheet serves one at `http://<rig>:29410/` (`train_port` + 10;
+**Progress page.** Every rig on this miner's flight sheet serves one, whatever its mode, at `http://<rig>:29410/` (`train_port` + 10;
 the miner log has the link). Open it from any rig, on any device on the LAN: it asks every rig that rig has heard in the last week and draws
 them together, so it shows the whole run whichever rigs are training. It has the loss per step, the steps left to train,
-the size of the dataset, and when each rig was training, waiting or away. **Do the rigs hold each other up?** A step
+the size of the dataset, how long the latest stretch of training took (or has been going), and when each rig was
+training, waiting or away. A rig that serves or makes a model says so, with the step of the export it is on, and
+shows its GPU memory and miner log like the others; with no training anywhere the page is only that. **Do the rigs hold each other up?** A step
 ends when every rig has done its part, so a rig that is done early stands still until the slowest is. The page shows,
 per rig, how its step time divides between computing, waiting for the other rigs, and exchanging the gradients over
 the network, with the waiting and the network share each marked fine (under 15%), worth a look, or holding the run up
@@ -417,6 +419,31 @@ run's `adapter` folder copied to `<data_dir>/train/runs/<run_name>/adapter` firs
 
 The merge is done at the base model's own 16-bit precision, like PEFT's and Unsloth's exports.
 
+### As a command, on a rig that serves
+
+To try what a run has learned so far without taking a rig off its flight sheet, run this on a rig that is serving,
+from Hive's "Run command" or a shell:
+
+```
+/hive/miners/custom/ollama-hive/export-run.sh from=192.168.1.232 export_name=qwen3.8-unity:27b full_base=Qwen/Qwen3.8-27B
+```
+
+It fetches the run's adapter from the training rig in `from=` as it stands at that moment (every training rig hands
+it out on its progress page's port), does the same work as `mode=export`, and adds the result to that rig's Ollama
+as one more model, to be asked for by name. It returns at once and works on in the background; the miner log and the
+progress page of that rig say how far it is. The training goes on, and the model the rig serves stays loaded:
+everything but the last step runs on the CPU, so the rig is slower meanwhile.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `from` | none | A rig that is training the run, `address` or `address:port`. Without it, the adapter already in `<data_dir>/train/runs/<run_name>/adapter` on this rig is used |
+| `export_name` | the run's name | Name of the Ollama model to make. One that exists is not overwritten: give a new name for a run that has trained further |
+| `full_base` | the flight sheet's, of this rig or the training rig | As for `mode=export`. Put `full_base=` on the training flight sheet and the command needs no more than `from=` |
+| `run_name`, `model`, `quant`, `llama_cpp` | this rig's flight sheet | As for `mode=export`. `model` is the stock model whose Modelfile is reused: by default the one this rig serves |
+
+Stopping the miner stops it too, as for a rental; the same command then goes on where it was. A download that fails
+is tried again by itself, five times two minutes apart. It needs the same free disk space as `mode=export`.
+
 **Tested** in WSL (Ubuntu 20.04) with a small model: the whole flow with llama.cpp's real converter and
 `llama-quantize`, against a stand-in for the `ollama` binary, and the merged weights are bit-identical to PEFT's own
 merge. Not yet run: a 27B model, and Ollama's import of the result (a new weights file next to the stock projector,
@@ -442,6 +469,8 @@ curl -s http://$(cat /run/ollama-hive/address):11434/api/ps | jq
 - `train.py`: one worker of the QLoRA run
 - `status.py`, `status.html`: the progress page of a run, and the rig's part of its data
 - `requirements-speedups.txt`: the optional packages of `speedups=1`
+- `export-run.sh`: the export as a command, for a rig that serves
+- `h-log.sh`: the miner log and the waiting, for `h-run.sh` and `export-run.sh`
 - `problem.py`: what stopped a rig's last attempts at training, kept between attempts for the progress page
 - `requirements-train.txt`: the Python packages of the training environment
 - `h-export.sh`: `mode=export`: makes an Ollama model of a run

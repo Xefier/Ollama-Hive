@@ -135,6 +135,10 @@ def merge(args):
         snapshot_download(args.base, local_dir=args.out, ignore_patterns=["*.safetensors", "*.gguf", "*.bin", "*.onnx", "*.onnx_data"])
 
     for number, name in enumerate(sorted(files), 1):
+        if args.status_file:
+            # For the progress page: the download of a file is most of its time
+            with open(args.status_file, "w", encoding="utf-8") as handle:
+                handle.write(f"step 1 of 4: adding the adapter to the base model's weights, file {number} of {len(files)}\n")
         target = os.path.join(args.out, name)
         # A finished file was moved into place whole, so one that exists is done
         if os.path.exists(target):
@@ -200,6 +204,7 @@ def main():
     command.add_argument("--adapter", required=True)
     command.add_argument("--base", required=True)
     command.add_argument("--out", required=True)
+    command.add_argument("--status-file", help="where to say how far it is, for the progress page")
     command.set_defaults(run=merge)
     command = commands.add_parser("modelfile")
     command.add_argument("stock")
