@@ -75,7 +75,9 @@ def base_tensors(base):
 def match_modules(modules, files):
     """{weights file: {tensor name: module path}}. The adapter names modules as the loaded model does, the files as
     the checkpoint does, and the two can differ at the front (a text-only class drops a prefix), so each module is
-    matched to the tensor sharing its longest tail of names, and the shapes must agree."""
+    matched to the tensor sharing its longest tail of names, and the shapes must agree. Where several tensors share
+    that tail, the one that also starts most like the module is it: Qwen3.8 has a small block beside the model
+    (mtp.layers.0...) whose weights end like the first layer's and are as large."""
     by_tail = {}
     for name, tensors in files.items():
         for key, shape in tensors.items():
@@ -95,6 +97,14 @@ def match_modules(modules, files):
             found = [entry for entry in by_tail.get(".".join(parts[start:]), []) if entry[2] == wanted]
             if found:
                 break
+        if len(found) > 1:
+            def same_start(entry):
+                names = entry[1].split(".")
+                return next((count for count, (ours, theirs) in enumerate(zip(parts, names)) if ours != theirs),
+                            min(len(parts), len(names)))
+
+            best = max(same_start(entry) for entry in found)
+            found = [entry for entry in found if same_start(entry) == best]
         if len(found) != 1 or (found[0][0], found[0][1]) in taken:
             sys.exit(f"Can't place the adapter's {path} in the base model: {len(found)} tensors fit. "
                      "Is this the full-precision repo of the model the adapter was trained on?")
