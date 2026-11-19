@@ -304,29 +304,25 @@ the untuned model on correctness and beats it only on following the output forma
 (`TheClassrooms-training/results/HELDOUT-RESULTS.md`). Fine-tuning on 224 accepted fixes has not yet made the model
 a better programmer for this game; it has made its answers easier to apply.
 
-## The code pipeline (`local_llm_code`), 2026-11-18: built, not yet measured
+## The code pipeline (`local_llm_code`), 2026-11-18
 
 The client's `local_llm_code` tool (README, "Writing code") wraps the model in three stages: attached declarations
-with one ask-first pass, compile and retry, several tries. **Its effect has not been measured**: the owner held the
-full run (35 held-out tasks, 3 tries each, 60 to 90 minutes per rig), so there is no per-stage table yet. What exists:
+with one ask-first pass, compile and retry, several tries. Measured on the game's 35 held-out fixes, both rigs at
+Q4_K_M and 30,000 context, graded blind against the baseline's answers (the method, the full tables and the
+per-task verdicts are in `TheClassrooms-training/results/HELDOUT-RESULTS.md`, "The code pipeline"). Usable means
+the accepted fix or close to it.
 
-- **Checks that ran:** `client/test_code_pipeline.py` (19 tests of answer parsing, splicing, choosing a try and the
-  C# scanner); one real call through the MCP handler on the tuned rig (compiles, nothing written to the project);
-  and nine task runs on the two rigs while building, on code that was still changing, so their numbers are not
-  results.
-- **What those runs showed, as observations only:**
-  - With thinking off the ask-first pass answers "nothing"; with thinking on, and the attached declarations in
-    front of it, both models ask for real gaps. For 86e3tthyb ("the constant for the `"Dieing"` event") the literal
-    search attaches `EntityRespawnReset`, which the accepted fix uses and every earlier arm guessed wrong.
-  - Models ask for method bodies as often as for declarations (`Light_Base.SetUpLight`), so `NEED: Type.Member`
-    on a project type returns that member's code.
-  - A model that answers only the file it changed used to count as a format failure; it now means the other file
-    is unchanged.
-  - New files failed on a missing `using` (`NamedEvents` is in `Xefier.Events`): the index now records each
-    project type's namespace, and a retry names the namespace of a type the compiler could not find.
-- **To measure it** (TheClassrooms-training, with the owner's go-ahead for the rig time):
-  `python tools/code_arm.py --project <game> --label qwen3.8-27b-set2 --rig http://192.168.1.182:11434`, the same
-  with `--label qwen3.8-unity-v2 --rig http://192.168.1.189:11434`, then `--summary` for compile counts and token
-  cost per stage, and `tools/grade_packets.py` for blind grading against the baseline answers. That arm gives the
-  pipeline the project as it was before each task (not today's checkout, which holds the fixes) and compile-checks
-  31 of the 35 tasks (`tools/snapshot_check.py`; 20 without it).
+| Stage | Untuned qwen3.8:27b usable | Untuned compiles, of checkable | Tuned v2 usable | Tuned v2 compiles, of checkable |
+|---|---|---|---|---|
+| baseline: one plain answer, declarations in the prompt | 32 of 70 | 18 of 25 (24 of 68 could not be spliced) | 28 of 68 | 21 of 34 |
+| context only: one try | 36 of 70 | 35 of 63 | 32 of 70 | 33 of 64 |
+| + retry | 38 of 70 | 44 of 62 | 30 of 70 | 42 of 64 |
+| + 3 tries: the tool's answer | 16 of 35 | 25 of 31 | 17 of 35 | 28 of 31 |
+
+- **It makes answers applicable:** every answer the tool returned could be spliced and most compile.
+- **It has not made them more often right.** The gain in usable answers is four to six in 70, within the noise of
+  two runs, and the returned answer is right as often as a plain one (46% and 49%). The first try that compiles
+  is not the best try: compiling rules out invented names, not wrong behaviour.
+- **Cost:** about 2.2 times the answer tokens of two plain runs, 2.5 to 3.5 minutes per task.
+- **Open:** choosing among the tries by something other than "compiles" (on 7 untuned tasks a usable try was
+  there and another was returned), and the tasks the models misread, which no stage moves.
