@@ -1,0 +1,829 @@
+<title>Classrooms code results</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Layout: one reading column (max 1040px), newest section first; chart panels sit in an auto-fit grid that stacks to one column on a phone. */
+:root {
+  --bg: #f3f6f5; --surface: #ffffff; --fg: #13201e; --muted: #53625f; --faint: #75837f;
+  --line: #d6dfdd; --track: #e5ecea; --accent: #1f6b66; --accent-soft: #dcecea;
+  --v-same: #1c5cab; --v-same-ink: #ffffff;
+  --v-close: #86b6ef; --v-close-ink: #0b1a2e;
+  --v-partial: #f1b9a9; --v-partial-ink: #3a130b;
+  --v-wrong: #c43c3c; --v-wrong-ink: #ffffff;
+  --v-none: #7d8986;
+  --font-head: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1413; --surface: #161e1d; --fg: #e4ecea; --muted: #a2b3af; --faint: #82938f;
+    --line: #2a3735; --track: #24312f; --accent: #55b8ad; --accent-soft: #1c3633;
+    --v-same: #6da7ec; --v-same-ink: #08182b;
+    --v-close: #2a5f9e; --v-close-ink: #ffffff;
+    --v-partial: #8a463c; --v-partial-ink: #ffffff;
+    --v-wrong: #e66767; --v-wrong-ink: #2a0707;
+    --v-none: #82938f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1413; --surface: #161e1d; --fg: #e4ecea; --muted: #a2b3af; --faint: #82938f;
+  --line: #2a3735; --track: #24312f; --accent: #55b8ad; --accent-soft: #1c3633;
+  --v-same: #6da7ec; --v-same-ink: #08182b;
+  --v-close: #2a5f9e; --v-close-ink: #ffffff;
+  --v-partial: #8a463c; --v-partial-ink: #ffffff;
+  --v-wrong: #e66767; --v-wrong-ink: #2a0707;
+  --v-none: #82938f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1040px; margin: 0 auto; padding-block: 24px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { font-family: var(--font-head); text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 1.75rem; font-weight: 600; }
+h2 { font-size: 1.35rem; font-weight: 600; }
+h3 { font-size: 1.02rem; font-weight: 600; }
+p { margin: 0; }
+a { color: var(--accent); }
+a:focus-visible, summary:focus-visible, .tbl-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lede { color: var(--muted); max-width: 68ch; }
+header.top { display: grid; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.eyebrow { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; }
+section.block { display: grid; gap: 16px; padding-block: 28px; border-bottom: 1px solid var(--line); min-width: 0; }
+.sec-head { display: grid; gap: 4px; }
+.sec-date { font-size: 0.85rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+.findings { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 72ch; }
+.findings li::marker { color: var(--accent); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; gap: 12px; min-width: 0; align-content: start; }
+.panel-title { display: grid; gap: 2px; }
+.panel-title .cond { font-size: 0.8rem; color: var(--faint); }
+.sub-h { font-size: 0.78rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.bars { display: grid; gap: 10px; }
+.row-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; font-size: 0.86rem; }
+.row-label { min-width: 0; }
+.row-sub { color: var(--faint); font-size: 0.78rem; }
+.row-val { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.row-val b { color: var(--fg); font-weight: 600; }
+.track { height: 10px; background: var(--track); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.fill { height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; }
+.fill.ref { background: repeating-linear-gradient(135deg, var(--accent) 0 4px, var(--accent-soft) 4px 7px); }
+.na { font-size: 0.8rem; color: var(--faint); font-style: italic; margin-top: 2px; }
+.group-label { font-size: 0.8rem; color: var(--faint); font-weight: 600; padding-top: 4px; }
+.vrows { display: grid; gap: 12px; }
+.stack { display: flex; gap: 2px; height: 22px; margin-top: 4px; }
+.seg { min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; }
+.seg:first-child { border-radius: 4px 0 0 4px; }
+.seg:last-child { border-radius: 0 4px 4px 0; }
+.stack-key { font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 3px; }
+.v-same { background: var(--v-same); color: var(--v-same-ink); }
+.v-close { background: var(--v-close); color: var(--v-close-ink); }
+.v-partial { background: var(--v-partial); color: var(--v-partial-ink); }
+.v-wrong { background: var(--v-wrong); color: var(--v-wrong-ink); }
+.v-noAnswer { background: repeating-linear-gradient(45deg, var(--v-none) 0 2px, transparent 2px 5px); color: var(--fg); box-shadow: inset 0 0 0 1px var(--v-none); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.82rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); max-width: 100%; }
+.tbl-wrap.tall { max-height: 70vh; overflow-y: auto; }
+table { border-collapse: collapse; font-size: 0.84rem; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { font-weight: 600; color: var(--muted); font-size: 0.78rem; background: var(--surface); }
+.tbl-wrap.tall thead th { position: sticky; top: 0; z-index: 1; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.nowrap td, .nowrap th { white-space: nowrap; }
+.stick th:first-child, .stick td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+.tbl-wrap.tall.stick thead th:first-child { z-index: 2; }
+th.grp { text-align: center; border-left: 1px solid var(--line); }
+td.gs, th.gs { border-left: 1px solid var(--line); }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.8rem; }
+.chip { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.74rem; font-weight: 600; line-height: 1.5; }
+.chips { display: inline-flex; gap: 4px; flex-wrap: nowrap; }
+.minibar { display: inline-block; height: 8px; background: var(--accent); border-radius: 0 3px 3px 0; vertical-align: middle; margin-left: 8px; }
+details { display: grid; gap: 10px; }
+details > summary { cursor: pointer; font-weight: 600; font-family: var(--font-head); padding: 8px 0; color: var(--fg); }
+details[open] > summary { margin-bottom: 8px; }
+.note { font-size: 0.8rem; color: var(--faint); max-width: 72ch; }
+.caveats { border-left: 3px solid var(--line); padding: 4px 0 4px 12px; display: grid; gap: 6px; }
+.caveats h3 { font-size: 0.9rem; }
+.caveats ul { margin: 0; padding-left: 1.1em; display: grid; gap: 4px; font-size: 0.86rem; color: var(--muted); max-width: 72ch; }
+.src { font-size: 0.78rem; color: var(--faint); overflow-wrap: anywhere; }
+.src code { font-size: 0.76rem; }
+footer { padding-top: 20px; font-size: 0.8rem; color: var(--faint); display: grid; gap: 4px; }
+@media (prefers-reduced-motion: no-preference) { details > summary { transition: color .15s; } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">The Classrooms · Unity · local models writing C#</div>
+    <h1>Classrooms code results</h1>
+    <p class="lede" id="lede"></p>
+    <nav class="toc" id="toc" aria-label="Sections"></nav>
+  </header>
+  <main id="main"></main>
+  <footer id="foot"></footer>
+</div>
+
+<script id="dashboard-data">
+/* ============================================================================
+   DATA: every number on the page comes from here. Edit this block only to add
+   or correct results; the script below draws whatever is in it.
+   - Counts are [numerator, denominator]. null means "not recorded" in the source.
+   - Each set says where it came from: source.file and source.section.
+   - A new set appears on the page when its `section` matches a section id.
+   See README.md in this folder.
+   ========================================================================== */
+const DATA = {
+  lastUpdated: "2026-11-18",
+  files: {
+    heldout: "TheClassrooms/TheClassrooms-training/results/HELDOUT-RESULTS.md",
+    results: "Ollama-Hive/eval/RESULTS.md",
+    verdictsUntuned: "TheClassrooms/TheClassrooms-training/results/qwen3.8-27b-set2-code/VERDICTS.md",
+    verdictsTuned: "TheClassrooms/TheClassrooms-training/results/qwen3.8-unity-v2-code/VERDICTS.md"
+  },
+
+  sections: [
+    {
+      id: "pipeline", kind: "pipeline",
+      title: "The code pipeline (local_llm_code)",
+      date: "2026-11-18",
+      about: "The game's 35 held-out fixes run through Ollama-Hive's local_llm_code tool: it attaches declarations and makes one ask-first pass, sends 3 tries at once, compiles each, and retries a failing try once with the compiler's errors. Both models at Q4_K_M, 30,000 context. The baseline's answers and the pipeline's were graded blind together. Usable means the accepted fix or close to it.",
+      findings: [
+        "Answers became applicable, not more often right. Every answer the tool returned could be spliced into the game's file, and 25 and 28 of the 31 checkable ones compile.",
+        "Usable answers moved by four to six in 70, which is what two runs of one model differ by. The tool's answer is usable on 16 and 17 of 35 tasks (46% and 49%), the baseline's rate.",
+        "The first try that compiles is not the best try. Compiling rules out invented names, not wrong behaviour: on 7 untuned tasks one of tries 1 and 2 was usable and the returned one was not.",
+        "Cost: about 2.2 times the answer tokens of two plain runs, 2.5 to 3.5 minutes per task."
+      ],
+      stages: [
+        { key: "baseline", label: "baseline", sub: "one plain answer, declarations in the prompt, 2 runs" },
+        { key: "context", label: "context only", sub: "one try as first answered, tries 1 and 2" },
+        { key: "retry", label: "+ retry", sub: "that try after its retry, tries 1 and 2" },
+        { key: "tool", label: "+ 3 tries", sub: "the answer the tool returns, one per task" }
+      ],
+      tokenNote: "The context only and + retry rows cost each try as its own one-try call, including its ask-first pass. The + 3 tries row is what the tool spends: the ask-first pass, three tries, and retries only when no first try compiled. Baseline prompt tokens were not recorded. Rows cover different numbers of answers (68 or 70, then 35).",
+      perTaskNote: "Each cell is tries 1 / 2 (baseline: runs 1 / 2); the last column is the tool's answer. From the two VERDICTS.md files.",
+      caveats: [
+        "Grading here is blind and by different reviewers (five per model) than the earlier sections, so the baseline row differs a little from the 34-task table below (untuned 32 usable here, 35 there). Do not compare rows across sections.",
+        "The baseline compile column covers fewer answers: 24 of the untuned baseline's 68 answers could not be spliced, so only 25 were compile-checked. 31 of the 35 tasks can be compile-checked at all.",
+        "The first three stages count about 70 answers (two per task); the tool's answer is one per task (35).",
+        "The tuned baseline was never run on the practice task 86e3te65j, so its row has 68 answers. Its VERDICTS.md file counts those two as \"no answer\" (28 of 70); this page uses HELDOUT-RESULTS.md (28 of 68).",
+        "Two runs per task: a difference of four to six answers in 70 is within noise."
+      ],
+      sources: [
+        { file: "heldout", section: "The code pipeline: Ollama-Hive's local_llm_code (2026-11-18)" },
+        { file: "results", section: "The code pipeline (local_llm_code), 2026-11-18" },
+        { file: "verdictsUntuned", section: "whole file" },
+        { file: "verdictsTuned", section: "whole file" }
+      ]
+    },
+    {
+      id: "heldout34", kind: "heldout",
+      title: "Tuned v2 against untuned: 34 held-out tasks",
+      date: "2026-11-18",
+      about: "Both models got the same 68 prompts (34 tasks, two runs each), carrying the declarations a tool could attach. Q4_K_M, 30,000 context, fully on the GPU. Three Claude reviewers per model.",
+      findings: [
+        "No gain in correctness: 35 of 68 answers are the accepted fix or close to it for both models. The tuned model is better on 12 tasks and worse on 8, which is what two runs of the same model look like.",
+        "A clear gain in following the output format: 24 untuned answers could not be spliced into the game's files, 4 tuned ones.",
+        "224 examples taught the output format and the house style, not the project knowledge that decides whether a fix is right."
+      ],
+      table: [
+        { label: "Could not be spliced", path: "unspliced", type: "frac" },
+        { label: "Compiles, of spliced and checkable", path: "compiles", type: "frac" },
+        { label: "No answer", path: "verdicts.noAnswer", type: "num" },
+        { label: "Answer tokens", path: "answerTokens", type: "num" }
+      ],
+      perTaskNote: "Each cell is run 1 / run 2.",
+      caveats: [
+        "Only 19 of the 34 accepted fixes can be compile-checked, so the compile column covers part of the set; the verdicts cover all of it.",
+        "Not comparable with the 14-task tables (prompts built differently) or with the blind-graded pipeline baseline above.",
+        "Tuned: 4 requests used the whole 30,000-token context thinking and returned nothing; 2 of them failed again on a second try."
+      ],
+      sources: [{ file: "heldout", section: "Tuned model v2 on the 34-task set (2026-11-18)" }]
+    },
+    {
+      id: "heldout14", kind: "heldout",
+      title: "14 held-out tasks: arms and tuned v1",
+      date: "2026-11-17 and 2026-11-18",
+      about: "The first held-out set: 14 completed Claude tasks never used for training, two runs each (28 answers). The arms add to the untuned qwen3.8:27b either attached declarations (decl), one compile-and-retry (retry), or both. Tuned v1 is the first fine-tune (69 examples, no declarations), run on the same prompts.",
+      findings: [
+        "Declarations up front improved correctness the most and need no second call: usable answers went from 7 to 12 of 28.",
+        "Retry compiles the most, but 4 of its compiling answers fixed nothing. A compile check catches invented names, not wrong behaviour.",
+        "Without declarations, tuning helped (usable 7 to 11 of 28); with declarations it added little (14 against 12, within grader noise).",
+        "Tasks the model misreads (86e3p7fkd, 86e3vnfhq, 86e4051d7) are wrong in every arm and in tuned v1."
+      ],
+      table: [
+        { label: "Compiles", path: "compile.compiles", type: "num" },
+        { label: "Errors", path: "compile.errors", type: "num" },
+        { label: "Format", path: "compile.format", type: "num" },
+        { label: "Not checkable", path: "compile.notCheckable", type: "num" },
+        { label: "No answer", path: "verdicts.noAnswer", type: "num" },
+        { label: "Second calls", path: "secondCalls", type: "num" },
+        { label: "Kept the output format", path: "keptFormat", type: "frac" },
+        { label: "Answer tokens", path: "answerTokens", type: "num" }
+      ],
+      tableNote: "Compile outcomes of the 28 answers: compiles, compile errors, wrong format (could not be spliced), not checkable (the file has changed too much since). Blank where the source has no figure.",
+      taskNames: {
+        "86e3m7x2q": "Madness eyes spawn clear of floor and walls",
+        "86e3p7fkd": "Customizer: right stick only orbits the camera",
+        "86e3tthyb": "Flashlight off at \"Dieing\"",
+        "86e3vp9je": "Fur renderer objects destroyed with Destroy in play mode",
+        "86e3vnfhq": "Descent: Nightmare no longer gains lives",
+        "86e3vp41j": "Arcade death no longer throws the player sideways",
+        "86e3wk7j5": "Light groups: no \"Coroutine couldn't be started\" on join",
+        "86e3x57w4": "Console: item codex with no Codex inventory",
+        "86e3xaqjw": "Water event with no controller warns instead of throwing",
+        "86e3x0bbn": "Voice: code switch during a lobby join",
+        "86e3zkryd": "Light returns from Dark at its authored range",
+        "86e402erb": "Arcade frog readout after a level load",
+        "86e3zm642": "Typing over a multiplayer page",
+        "86e4051d7": "Water drops cleared on respawn"
+      },
+      perTaskNote: "Each cell is run 1 / run 2. The source has per-task verdicts for these three sets only.",
+      caveats: [
+        "Each arm was graded by a separate Claude reviewer, slightly more lenient than the base grading on identical answers, so a difference of one or two answers between rows is grader noise.",
+        "11 of the 14 accepted fixes can be compile-checked; 3 tasks' files have changed too much since.",
+        "14 tasks, two runs: one task either way is 2 answers in 28.",
+        "Tuned v1 was trained without declarations and tested with them. Its rig held 15.2 GB of the model's 21.0 GB on the GPU, and 5 of 56 requests timed out or came back empty on the first try."
+      ],
+      sources: [
+        { file: "heldout", section: "Scores (28 answers each) and Per task (2026-11-17 baseline)" },
+        { file: "heldout", section: "Stopping invented names: three arms on the base model (2026-11-17)" },
+        { file: "heldout", section: "Tuned model v1: qwen3.8-unity:27b (2026-11-18)" }
+      ]
+    },
+    {
+      id: "six", kind: "six",
+      title: "Six-task coding test",
+      date: "2026-11-07 to 2026-11-18",
+      about: "Six frozen tasks (t1 to t5, and w1, a whole editor window), two runs each, think on, rules v2: 12 answers per set. Graded by Claude reading every answer and compiling it offline. Claude Haiku 5.5 is the reference.",
+      findings: [
+        "qwen3.8:27b is below Claude Haiku 5.5, which was correct as written on all 12 answers. The best local set was correct as written on 6 of 12.",
+        "Q8_0 on the 5090 with a q8_0 KV cache was right after small repairs on 12 of 12; the quantized cache cost nothing measurable.",
+        "The Classrooms fine-tunes are not better here: v1 lost ground, v2 is about level with the untuned Q4 set. Fine-tuning on 224 accepted fixes has made answers easier to apply, not more often right."
+      ],
+      metrics: [
+        { key: "firstTry", label: "First-try compiles" },
+        { key: "rightAfterRepairs", label: "Right after ≤2 one-line repairs" },
+        { key: "correctAsWritten", label: "Correct as written" }
+      ],
+      taskNames: { t1: "t1 ring buffer", t2: "t2 console command", t3: "t3 editor window", t4: "t4 bug fix", t5: "t5 Find* removal", w1: "w1 Apparel Editor" },
+      perTaskNote: "Run 1 / run 2. ✓ compiles first try, ✗n n compile errors (a floor when the compiler stopped early). pass: correct; minor: correct with minor defects; fixable: right after at most 2 one-line repairs; unusable. — not run.",
+      caveats: [
+        "Different graders: Claude Opus 5.5 for the qwen3.8 and Haiku sets, a Claude Fable 5.2 reviewer for the two tuned sets. The two Q8 sets were graded from the checks, not every answer read line by line.",
+        "Two runs per task, and the client sends no seed, so runs differ.",
+        "Haiku ran as a Claude Code subagent; its answer tokens are estimated from the size of its answers.",
+        "Closest Claude is the grader's judgement, not a measurement.",
+        "Two tuned v2 verdicts are judgement calls: they could make its right-after-repairs count 7/12 or 9/12."
+      ],
+      sources: [{ file: "results", section: "Comparable sets (think on, rules v2, two runs per task)" }]
+    },
+    {
+      id: "history", kind: "history",
+      title: "History: qwen3.5:27b (not comparable)",
+      date: "2026-11-03",
+      about: "The first trial: mixed rules and think modes, one run each, so these sets do not compare with the ones above or with each other. qwen3.5:27b Q4_K_M on the RTX 4090 (400 W), f16 cache, 64k context, 20.7 GB VRAM, 47–49 tok/s.",
+      taskNames: { t1: "t1 ring buffer", t2: "t2 console command", t3: "t3 editor window", t4: "t4 bug fix", t5: "t5 Find* removal", w1: "w1 Apparel Editor" },
+      sources: [{ file: "results", section: "History: not comparable (2026-11-03, mixed rules and think modes, one run each)" }]
+    }
+  ],
+
+  sets: [
+    /* ---------- Code pipeline: one set per model, one entry per stage ---------- */
+    {
+      id: "pipeline-untuned", section: "pipeline", date: "2026-11-18",
+      label: "Untuned qwen3.8:27b", model: "qwen3.8:27b",
+      conditions: "Q4_K_M, 30,000 context, rig 192.168.1.182, 35 tasks",
+      source: { file: "heldout", section: "The code pipeline … / Untuned qwen3.8:27b" },
+      stages: {
+        baseline: { answers: 70, verdicts: { same: 13, close: 19, partial: 31, wrong: 7, noAnswer: 0 }, usable: [32, 70], compiles: [18, 25], unspliced: [24, 68], calls: 68, promptTokens: null, answerTokens: 393191 },
+        context:  { answers: 70, verdicts: { same: 16, close: 20, partial: 28, wrong: 6, noAnswer: 0 }, usable: [36, 70], compiles: [35, 63], unspliced: [10, 70], calls: 140, promptTokens: 556308, answerTokens: 571276 },
+        retry:    { answers: 70, verdicts: { same: 17, close: 21, partial: 26, wrong: 6, noAnswer: 0 }, usable: [38, 70], compiles: [44, 62], unspliced: [3, 70], calls: 168, promptTokens: 744178, answerTokens: 721676 },
+        tool:     { answers: 35, verdicts: { same: 9, close: 7, partial: 15, wrong: 4, noAnswer: 0 }, usable: [16, 35], compiles: [25, 31], unspliced: [0, 35], calls: 166, promptTokens: 769408, answerTokens: 882496 }
+      },
+      extra: [
+        "Run took 104 minutes, median 142 s per task.",
+        "Asked for more in the ask-first pass on 29 of 35 tasks (125 lines, 105 answered with something not already in the prompt).",
+        "On 7 tasks one of tries 1 and 2 was usable and the returned answer was not."
+      ],
+      perTaskSource: { file: "verdictsUntuned" },
+      perTask: {
+        "86e3ktukx": ["partial / partial", "wrong / partial", "wrong / partial", "wrong"],
+        "86e3m7x2q": ["close / same", "close / close", "close / close", "close"],
+        "86e3mwpxy": ["partial / close", "close / partial", "close / partial", "partial"],
+        "86e3p7fkd": ["partial / wrong", "wrong / partial", "wrong / partial", "wrong"],
+        "86e3r3q1m": ["partial / partial", "close / close", "close / close", "close"],
+        "86e3td65v": ["same / wrong", "close / partial", "close / partial", "partial"],
+        "86e3te65j_1ce87d4ba9": ["close / partial", "close / partial", "close / partial", "partial"],
+        "86e3tthyb": ["close / close", "close / same", "close / same", "close"],
+        "86e3v38b4": ["close / partial", "partial / same", "close / same", "same"],
+        "86e3vp41j": ["same / same", "same / same", "same / same", "same"],
+        "86e3vp9je": ["close / close", "partial / close", "partial / close", "partial"],
+        "86e3vrj21": ["wrong / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3w4auy": ["partial / close", "partial / close", "partial / close", "partial"],
+        "86e3w4x2v": ["wrong / wrong", "wrong / wrong", "wrong / wrong", "wrong"],
+        "86e3w58hp": ["partial / partial", "close / close", "close / close", "close"],
+        "86e3wcxju": ["same / same", "same / same", "same / same", "same"],
+        "86e3wgrye": ["same / same", "same / same", "same / same", "same"],
+        "86e3whhtp": ["partial / same", "same / same", "same / same", "same"],
+        "86e3wk7j5": ["close / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3x0bbn": ["same / same", "same / same", "same / same", "same"],
+        "86e3x16a7": ["partial / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3x4grn": ["close / partial", "partial / close", "partial / close", "partial"],
+        "86e3x51um": ["close / partial", "same / same", "same / same", "same"],
+        "86e3x57w4": ["partial / partial", "close / close", "close / close", "close"],
+        "86e3x7j8t": ["partial / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3xaqjw": ["close / same", "close / close", "close / close", "close"],
+        "86e3xjp91": ["close / same", "partial / partial", "same / partial", "partial"],
+        "86e3y72ev": ["partial / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3zh9xh": ["close / close", "partial / partial", "partial / partial", "partial"],
+        "86e3zjxqj": ["partial / close", "same / partial", "same / partial", "same"],
+        "86e3zkryd": ["close / close", "partial / partial", "partial / partial", "partial"],
+        "86e3zm642": ["partial / partial", "same / close", "same / close", "same"],
+        "86e402erb": ["partial / partial", "close / close", "close / close", "close"],
+        "86e4051d7": ["wrong / wrong", "wrong / partial", "wrong / partial", "wrong"],
+        "86e4064da": ["partial / partial", "partial / wrong", "partial / wrong", "partial"]
+      }
+    },
+    {
+      id: "pipeline-tuned-v2", section: "pipeline", date: "2026-11-18",
+      label: "Tuned v2 qwen3.8-unity:27b", model: "qwen3.8-unity:27b (LoRA on qwen3.8:27b, run unity-2)",
+      conditions: "Q4_K_M, 30,000 context, rig 192.168.1.189, 35 tasks",
+      source: { file: "heldout", section: "The code pipeline … / Tuned v2 qwen3.8-unity:27b" },
+      stages: {
+        baseline: { answers: 68, verdicts: { same: 13, close: 15, partial: 29, wrong: 9, noAnswer: 2 }, usable: [28, 68], compiles: [21, 34], unspliced: [4, 68], calls: 68, promptTokens: null, answerTokens: 501729 },
+        context:  { answers: 70, verdicts: { same: 18, close: 14, partial: 26, wrong: 10, noAnswer: 2 }, usable: [32, 70], compiles: [33, 64], unspliced: [4, 70], calls: 143, promptTokens: 573419, answerTokens: 624339 },
+        retry:    { answers: 70, verdicts: { same: 18, close: 12, partial: 31, wrong: 7, noAnswer: 2 }, usable: [30, 70], compiles: [42, 64], unspliced: [0, 70], calls: 172, promptTokens: 781933, answerTokens: 793721 },
+        tool:     { answers: 35, verdicts: { same: 8, close: 9, partial: 15, wrong: 3, noAnswer: 0 }, usable: [17, 35], compiles: [28, 31], unspliced: [0, 35], calls: 172, promptTokens: 797177, answerTokens: 1017139 }
+      },
+      extra: [
+        "Run took 152 minutes, median 208 s per task.",
+        "Asked for more in the ask-first pass on 33 of 35 tasks (133 lines, 106 answered).",
+        "5 requests came back empty at the context limit and were sent again with thinking off; 3 tries still gave no answer."
+      ],
+      perTaskSource: { file: "verdictsTuned" },
+      perTaskFootnotes: { "86e3te65j_1ce87d4ba9": "Tuned baseline never run on this task (HELDOUT-RESULTS.md); VERDICTS.md lists it as no answer." },
+      perTask: {
+        "86e3ktukx": ["no answer / partial", "partial / wrong", "partial / wrong", "wrong"],
+        "86e3m7x2q": ["same / partial", "partial / close", "partial / close", "close"],
+        "86e3mwpxy": ["close / partial", "partial / partial", "partial / partial", "partial"],
+        "86e3p7fkd": ["wrong / partial", "wrong / no answer", "wrong / no answer", "wrong"],
+        "86e3r3q1m": ["close / close", "close / partial", "close / partial", "partial"],
+        "86e3td65v": ["same / close", "close / close", "close / close", "close"],
+        "86e3te65j_1ce87d4ba9": ["no answer / no answer", "partial / same", "partial / same", "partial"],
+        "86e3tthyb": ["partial / partial", "same / same", "same / same", "same"],
+        "86e3v38b4": ["same / partial", "close / same", "close / same", "close"],
+        "86e3vp41j": ["same / same", "same / no answer", "same / no answer", "same"],
+        "86e3vp9je": ["close / partial", "partial / close", "partial / close", "partial"],
+        "86e3vrj21": ["wrong / partial", "wrong / partial", "partial / partial", "partial"],
+        "86e3w4auy": ["wrong / partial", "close / partial", "close / partial", "close"],
+        "86e3w4x2v": ["wrong / no answer", "wrong / partial", "wrong / partial", "partial"],
+        "86e3w58hp": ["wrong / partial", "same / partial", "same / partial", "same"],
+        "86e3wcxju": ["same / same", "same / same", "same / same", "same"],
+        "86e3wgrye": ["same / same", "same / same", "same / same", "same"],
+        "86e3whhtp": ["partial / close", "close / partial", "close / partial", "close"],
+        "86e3wk7j5": ["close / same", "same / same", "same / same", "same"],
+        "86e3x0bbn": ["same / same", "same / same", "same / same", "same"],
+        "86e3x16a7": ["partial / partial", "partial / wrong", "partial / partial", "partial"],
+        "86e3x4grn": ["close / close", "partial / partial", "partial / partial", "partial"],
+        "86e3x51um": ["partial / close", "same / partial", "same / partial", "same"],
+        "86e3x57w4": ["partial / close", "close / partial", "close / partial", "close"],
+        "86e3x7j8t": ["partial / partial", "partial / wrong", "partial / wrong", "partial"],
+        "86e3xaqjw": ["close / close", "close / same", "close / same", "close"],
+        "86e3xjp91": ["partial / partial", "partial / same", "partial / same", "partial"],
+        "86e3y72ev": ["partial / wrong", "partial / partial", "partial / partial", "partial"],
+        "86e3zh9xh": ["partial / close", "wrong / wrong", "partial / wrong", "close"],
+        "86e3zjxqj": ["partial / same", "partial / same", "partial / same", "partial"],
+        "86e3zkryd": ["partial / close", "close / close", "close / partial", "close"],
+        "86e3zm642": ["partial / partial", "close / partial", "partial / partial", "partial"],
+        "86e402erb": ["partial / partial", "partial / partial", "partial / partial", "partial"],
+        "86e4051d7": ["partial / wrong", "partial / close", "partial / close", "partial"],
+        "86e4064da": ["wrong / wrong", "wrong / wrong", "wrong / wrong", "wrong"]
+      }
+    },
+
+    /* ---------- Held-out, 34-task set ---------- */
+    {
+      id: "h34-untuned", section: "heldout34", date: "2026-11-18",
+      label: "Untuned", model: "qwen3.8:27b", conditions: "Q4_K_M, 30,000 context, rig 192.168.1.182",
+      source: { file: "heldout", section: "Tuned model v2 on the 34-task set (2026-11-18)" },
+      answers: 68, verdicts: { same: 13, close: 22, partial: 21, wrong: 12, noAnswer: 0 },
+      unspliced: [24, 68], compiles: [18, 25], answerTokens: 393191,
+      perTask: {
+        "86e3ktukx": "wrong / wrong", "86e3m7x2q": "close / close", "86e3mwpxy": "partial / close", "86e3p7fkd": "partial / wrong",
+        "86e3r3q1m": "partial / partial", "86e3td65v": "same / wrong", "86e3tthyb": "close / close", "86e3v38b4": "close / close",
+        "86e3vp41j": "same / same", "86e3vp9je": "close / close", "86e3vrj21": "wrong / wrong", "86e3w4auy": "partial / close",
+        "86e3w4x2v": "wrong / wrong", "86e3w58hp": "close / partial", "86e3wcxju": "same / same", "86e3wgrye": "same / same",
+        "86e3whhtp": "partial / close", "86e3wk7j5": "close / partial", "86e3x0bbn": "same / same", "86e3x16a7": "partial / wrong",
+        "86e3x4grn": "close / partial", "86e3x51um": "same / close", "86e3x57w4": "close / partial", "86e3x7j8t": "partial / close",
+        "86e3xaqjw": "close / same", "86e3xjp91": "same / same", "86e3y72ev": "partial / partial", "86e3zh9xh": "close / close",
+        "86e3zjxqj": "partial / close", "86e3zkryd": "close / partial", "86e3zm642": "partial / partial", "86e402erb": "partial / partial",
+        "86e4051d7": "wrong / wrong", "86e4064da": "wrong / partial"
+      }
+    },
+    {
+      id: "h34-tuned-v2", section: "heldout34", date: "2026-11-18",
+      label: "Tuned v2", model: "qwen3.8-unity:27b (224 examples, declarations attached)", conditions: "Q4_K_M, 30,000 context, rig 192.168.1.189",
+      source: { file: "heldout", section: "Tuned model v2 on the 34-task set (2026-11-18)" },
+      answers: 68, verdicts: { same: 12, close: 23, partial: 22, wrong: 9, noAnswer: 2 },
+      unspliced: [4, 68], compiles: [21, 34], answerTokens: 501729,
+      perTask: {
+        "86e3ktukx": "no answer / partial", "86e3m7x2q": "close / partial", "86e3mwpxy": "partial / partial", "86e3p7fkd": "wrong / partial",
+        "86e3r3q1m": "close / close", "86e3td65v": "close / close", "86e3tthyb": "partial / wrong", "86e3v38b4": "same / close",
+        "86e3vp41j": "same / same", "86e3vp9je": "close / partial", "86e3vrj21": "wrong / wrong", "86e3w4auy": "wrong / partial",
+        "86e3w4x2v": "wrong / no answer", "86e3w58hp": "wrong / partial", "86e3wcxju": "same / same", "86e3wgrye": "same / same",
+        "86e3whhtp": "close / close", "86e3wk7j5": "close / close", "86e3x0bbn": "same / same", "86e3x16a7": "partial / partial",
+        "86e3x4grn": "close / close", "86e3x51um": "close / close", "86e3x57w4": "partial / close", "86e3x7j8t": "close / partial",
+        "86e3xaqjw": "close / same", "86e3xjp91": "partial / partial", "86e3y72ev": "partial / partial", "86e3zh9xh": "close / close",
+        "86e3zjxqj": "close / same", "86e3zkryd": "partial / same", "86e3zm642": "partial / partial", "86e402erb": "close / close",
+        "86e4051d7": "partial / wrong", "86e4064da": "wrong / partial"
+      }
+    },
+
+    /* ---------- Held-out, 14-task set ---------- */
+    {
+      id: "h14-base", section: "heldout14", group: "Untuned qwen3.8:27b, arms (2026-11-17)", date: "2026-11-17",
+      label: "base", model: "qwen3.8:27b", conditions: "Q4_K_M, 64k context, plain prompt",
+      source: { file: "heldout", section: "Scores (28 answers each); Stopping invented names: three arms (base row)" },
+      answers: 28, verdicts: { same: 2, close: 5, partial: 7, wrong: 14, noAnswer: 0 },
+      compile: { compiles: 6, errors: 15, format: 2, notCheckable: 5 }, secondCalls: 0, keptFormat: [25, 28], answerTokens: 75016,
+      perTask: {
+        "86e3m7x2q": "close / close", "86e3p7fkd": "wrong / wrong", "86e3tthyb": "partial / partial", "86e3vp9je": "partial / partial",
+        "86e3vnfhq": "wrong / wrong", "86e3vp41j": "same / same", "86e3wk7j5": "close / partial", "86e3x57w4": "partial / partial",
+        "86e3xaqjw": "close / close", "86e3x0bbn": "wrong / wrong", "86e3zkryd": "wrong / wrong", "86e402erb": "wrong / wrong",
+        "86e3zm642": "wrong / wrong", "86e4051d7": "wrong / wrong"
+      }
+    },
+    {
+      id: "h14-decl", section: "heldout14", group: "Untuned qwen3.8:27b, arms (2026-11-17)", date: "2026-11-17",
+      label: "decl", model: "qwen3.8:27b", conditions: "declarations attached",
+      source: { file: "heldout", section: "Stopping invented names: three arms on the base model (2026-11-17)" },
+      answers: 28, verdicts: { same: 4, close: 8, partial: 5, wrong: 11, noAnswer: 0 },
+      compile: { compiles: 15, errors: 5, format: 2, notCheckable: 6 }, secondCalls: 0, answerTokens: 89973
+    },
+    {
+      id: "h14-retry", section: "heldout14", group: "Untuned qwen3.8:27b, arms (2026-11-17)", date: "2026-11-17",
+      label: "retry", model: "qwen3.8:27b", conditions: "base answer compiled, one retry on errors",
+      source: { file: "heldout", section: "Stopping invented names: three arms on the base model (2026-11-17)" },
+      answers: 28, verdicts: { same: 2, close: 7, partial: 6, wrong: 13, noAnswer: 0 },
+      compile: { compiles: 17, errors: 4, format: 2, notCheckable: 5 }, secondCalls: 15, answerTokens: 113709
+    },
+    {
+      id: "h14-decl-retry", section: "heldout14", group: "Untuned qwen3.8:27b, arms (2026-11-17)", date: "2026-11-17",
+      label: "decl-retry", model: "qwen3.8:27b", conditions: "declarations attached, one retry on errors",
+      source: { file: "heldout", section: "Stopping invented names: three arms on the base model (2026-11-17)" },
+      answers: 28, verdicts: { same: 4, close: 8, partial: 5, wrong: 11, noAnswer: 0 },
+      compile: { compiles: 16, errors: 4, format: 2, notCheckable: 6 }, secondCalls: 5, answerTokens: 106460
+    },
+    {
+      id: "h14-tuned-v1-base", section: "heldout14", group: "Tuned v1 qwen3.8-unity:27b (2026-11-18)", date: "2026-11-18",
+      label: "tuned v1, base", model: "qwen3.8-unity:27b v1 (69 examples, no declarations)", conditions: "Q4_K_M, 64k context, plain prompt",
+      source: { file: "heldout", section: "Tuned model v1: qwen3.8-unity:27b (2026-11-18)" },
+      answers: 28, verdicts: { same: 3, close: 8, partial: 7, wrong: 9, noAnswer: 1 },
+      compile: { compiles: 10, errors: 10, format: 3, notCheckable: 4 }, secondCalls: null, answerTokens: 160964,
+      perTask: {
+        "86e3m7x2q": "close / partial", "86e3p7fkd": "wrong / wrong", "86e3tthyb": "close / close", "86e3vp9je": "partial / partial",
+        "86e3vnfhq": "wrong / wrong", "86e3vp41j": "same / same", "86e3wk7j5": "partial / close", "86e3x57w4": "partial / no answer",
+        "86e3xaqjw": "close / close", "86e3x0bbn": "same / close", "86e3zkryd": "close / wrong", "86e402erb": "partial / partial",
+        "86e3zm642": "wrong / wrong", "86e4051d7": "wrong / wrong"
+      }
+    },
+    {
+      id: "h14-tuned-v1-decl", section: "heldout14", group: "Tuned v1 qwen3.8-unity:27b (2026-11-18)", date: "2026-11-18",
+      label: "tuned v1, decl", model: "qwen3.8-unity:27b v1 (69 examples, no declarations)", conditions: "Q4_K_M, 64k context, declarations attached",
+      source: { file: "heldout", section: "Tuned model v1: qwen3.8-unity:27b (2026-11-18)" },
+      answers: 28, verdicts: { same: 6, close: 8, partial: 4, wrong: 10, noAnswer: 0 },
+      compile: { compiles: 12, errors: 5, format: 5, notCheckable: 6 }, secondCalls: null, answerTokens: 164282,
+      perTask: {
+        "86e3m7x2q": "close / close", "86e3p7fkd": "wrong / wrong", "86e3tthyb": "same / same", "86e3vp9je": "close / close",
+        "86e3vnfhq": "wrong / wrong", "86e3vp41j": "same / same", "86e3wk7j5": "partial / close", "86e3x57w4": "close / partial",
+        "86e3xaqjw": "close / close", "86e3x0bbn": "same / same", "86e3zkryd": "partial / wrong", "86e402erb": "partial / wrong",
+        "86e3zm642": "wrong / wrong", "86e4051d7": "wrong / wrong"
+      }
+    },
+
+    /* ---------- Six-task test (12 answers per set) ---------- */
+    {
+      id: "six-q4-4090", section: "six", date: "2026-11-07", label: "Q4 · 4090",
+      model: "qwen3.8:27b", quant: "Q4_K_M", gpu: "RTX 4090 (400 W)", kv: "f16", context: "64k", vram: "17.6 GB", toks: "111–130",
+      grader: "Claude Opus 5.5",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [10, 12], rightAfterRepairs: [10, 12], correctAsWritten: [4, 12] },
+      answerTokens: 60261, closestClaude: "Claude 3.5 Sonnet; below Haiku 5.5",
+      perTask: { t1: "✓ unusable / ✓ unusable", t2: "✓ fixable / ✗4 fixable", t3: "✓ minor / ✓ fixable", t4: "✓ fixable / ✓ fixable", t5: "✓ pass / ✓ minor", w1: "✓ minor / ✗1 fixable" }
+    },
+    {
+      id: "six-q8-5090-f16", section: "six", date: "2026-11-08", label: "Q8 · 5090 · f16",
+      model: "qwen3.8:27b", quant: "Q8_0", gpu: "RTX 5090 (520 W)", kv: "f16", context: "50k", vram: "31.1 GB", toks: "49–53",
+      grader: "Claude Opus 5.5 (from checks)",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [7, 12], rightAfterRepairs: [10, 12], correctAsWritten: [5, 12] },
+      answerTokens: 58450, closestClaude: "Claude 3.5 Sonnet; below Haiku 5.5",
+      perTask: { t1: "✓ pass / ✓ pass", t2: "✓ pass / ✓ fixable", t3: "✗1 fixable / ✗4 fixable", t4: "✓ unusable / ✗4 fixable", t5: "✓ pass / ✓ minor", w1: "✗3 unusable / ✗2 fixable" }
+    },
+    {
+      id: "six-q8-5090-q8kv", section: "six", date: "2026-11-08", label: "Q8 · 5090 · q8 KV",
+      model: "qwen3.8:27b", quant: "Q8_0", gpu: "RTX 5090 (520 W)", kv: "q8_0", context: "64k", vram: "30.4 GB", toks: "51–52",
+      grader: "Claude Opus 5.5 (from checks)",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [8, 12], rightAfterRepairs: [12, 12], correctAsWritten: [6, 12] },
+      answerTokens: 60700, closestClaude: "Claude 3.5 Sonnet; below Haiku 5.5",
+      perTask: { t1: "✓ pass / ✓ pass", t2: "✓ pass / ✓ pass", t3: "✗1 fixable / ✗1 fixable", t4: "✓ fixable / ✓ fixable", t5: "✓ pass / ✓ pass", w1: "✗1 fixable / ✗1 fixable" }
+    },
+    {
+      id: "six-haiku-5-5", section: "six", date: "2026-11-07", label: "Haiku 5.5", reference: true,
+      model: "claude-haiku-5-5", quant: "API", gpu: "—", kv: "—", context: "—", vram: "—", toks: "—",
+      grader: "Claude Opus 5.5",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [12, 12], rightAfterRepairs: [12, 12], correctAsWritten: [12, 12] },
+      answerTokens: 22000, answerTokensEstimated: true, closestClaude: "itself",
+      perTask: { t1: "✓ pass / ✓ pass", t2: "✓ minor / ✓ minor", t3: "✓ pass / ✓ minor", t4: "✓ pass / ✓ pass", t5: "✓ pass / ✓ pass", w1: "✓ pass / ✓ pass" }
+    },
+    {
+      id: "six-tuned-v1", section: "six", date: "2026-11-18", label: "Classrooms-tuned v1",
+      model: "qwen3.8-unity:27b (LoRA on qwen3.8:27b)", quant: "Q4_K_M", gpu: "rig 192.168.1.182 (card and power limit not recorded)", kv: "not recorded", context: "64k", vram: "21.0 GB, 15.2 GB of it on the GPU", toks: "22–34",
+      grader: "a Claude Fable 5.2 reviewer",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [5, 12], rightAfterRepairs: [9, 12], correctAsWritten: [3, 12] },
+      answerTokens: 80249, closestClaude: "Claude 3 Sonnet to 3.5 Sonnet; below the untuned Q4 · 4090",
+      perTask: { t1: "✓ pass / ✓ fixable", t2: "✗3 fixable / ✓ minor", t3: "✗1 fixable / ✗1 unusable", t4: "✗1 fixable / ✓ fixable", t5: "✗4 fixable / ✓ pass", w1: "✗8 unusable / ✗4 unusable" }
+    },
+    {
+      id: "six-tuned-v2", section: "six", date: "2026-11-18", label: "Classrooms-tuned v2",
+      model: "qwen3.8-unity:27b (LoRA on qwen3.8:27b, run unity-2)", quant: "Q4_K_M", gpu: "rig 192.168.1.189 (card and power limit not recorded), num_parallel=3", kv: "not recorded", context: "30k", vram: "19.2 GB", toks: "62–88",
+      grader: "a Claude Fable 5.2 reviewer",
+      source: { file: "results", section: "Comparable sets / Scores (12 answers each)" },
+      scores: { firstTry: [6, 12], rightAfterRepairs: [8, 12], correctAsWritten: [4, 12] },
+      answerTokens: 43894, closestClaude: "Claude 3.5 Sonnet; below Haiku 5.5, level with the untuned Q4 · 4090",
+      perTask: { t1: "✓ fixable / ✗1 fixable", t2: "✓ fixable / ✗1 unusable", t3: "✗4 unusable / ✗4 unusable", t4: "✓ pass / ✓ pass", t5: "✓ minor / ✓ minor", w1: "✗2 fixable / ✗1 unusable" }
+    },
+
+    /* ---------- History (not comparable) ---------- */
+    {
+      id: "hist-35-off-v1", section: "history", date: "2026-11-03", label: "3.5 · off · v1", model: "qwen3.5:27b", think: "off", rules: "v1",
+      source: { file: "results", section: "History: not comparable" },
+      scores: { firstTry: [2, 5], rightAfterRepairs: [3, 5] }, scoreNotes: { firstTry: "t1 compiles but is wrong", rightAfterRepairs: "t2, t4, t5" },
+      answerTokens: 7320, closestClaude: "Claude 3 Haiku",
+      perTask: { t1: "✓ unusable (tests fail)", t2: "✓ minor", t3: "✗1+ unusable", t4: "✗3 fixable", t5: "✗1 fixable", w1: "—" }
+    },
+    {
+      id: "hist-35-on-v1", section: "history", date: "2026-11-03", label: "3.5 · on · v1", model: "qwen3.5:27b", think: "on", rules: "v1",
+      source: { file: "results", section: "History: not comparable" },
+      scores: { firstTry: [1, 2], rightAfterRepairs: [2, 2] },
+      answerTokens: 9467, closestClaude: "Claude 3.5 Haiku",
+      perTask: { t1: "✓ pass", t2: "—", t3: "✗2 fixable", t4: "—", t5: "—", w1: "—" }
+    },
+    {
+      id: "hist-35-on-v2", section: "history", date: "2026-11-03", label: "3.5 · on · v2", model: "qwen3.5:27b", think: "on", rules: "v2",
+      source: { file: "results", section: "History: not comparable" },
+      scores: { firstTry: [0, 1], rightAfterRepairs: [0, 1] },
+      answerTokens: 10690, closestClaude: "Claude 3.5 Haiku",
+      perTask: { t1: "—", t2: "—", t3: "—", t4: "—", t5: "—", w1: "✗6 unusable" }
+    }
+  ]
+};
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var VERDICTS = [
+    { key: "same", label: "same" }, { key: "close", label: "close" }, { key: "partial", label: "partial" },
+    { key: "wrong", label: "wrong" }, { key: "noAnswer", label: "no answer" }
+  ];
+  var WORD_KEY = { "same": "same", "close": "close", "partial": "partial", "wrong": "wrong", "no answer": "noAnswer" };
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function fmt(n) { return n == null ? "not recorded" : Number(n).toLocaleString("en-US"); }
+  function pct(f) { return f && f[1] ? Math.round(100 * f[0] / f[1]) : null; }
+  function get(o, path) { return path.split(".").reduce(function (a, k) { return a == null ? a : a[k]; }, o); }
+  function fileName(key) { return DATA.files[key] || key; }
+  function setsFor(id) { return DATA.sets.filter(function (s) { return s.section === id; }); }
+  function usableOf(v) { return (v.same || 0) + (v.close || 0); }
+
+  function srcLine(sources) {
+    return '<p class="src">Source: ' + sources.map(function (s) {
+      return "<code>" + esc(fileName(s.file)) + "</code>, " + esc(s.section);
+    }).join("; ") + "</p>";
+  }
+  function findingsList(items) {
+    return items && items.length ? '<ul class="findings">' + items.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join("") + "</ul>" : "";
+  }
+  function caveatsBox(items) {
+    return items && items.length ? '<div class="caveats"><h3>Caveats</h3><ul>' + items.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join("") + "</ul></div>" : "";
+  }
+  function legend(withNone) {
+    return '<div class="legend" aria-hidden="true">' + VERDICTS.filter(function (v) { return withNone || v.key !== "noAnswer"; }).map(function (v) {
+      return '<span><i class="sw v-' + v.key + '"></i>' + v.label + "</span>";
+    }).join("") + "</div>";
+  }
+
+  /* A single-series bar: label, value as "n of d · p%". */
+  function barRow(label, sub, frac, opts) {
+    opts = opts || {};
+    var head = '<div class="row-head"><span class="row-label">' + esc(label) + (sub ? ' <span class="row-sub">' + esc(sub) + "</span>" : "") + "</span>";
+    if (!frac) return '<div>' + head + '<span class="row-val">not recorded</span></div></div>';
+    var p = pct(frac);
+    return '<div title="' + esc(label + ": " + frac[0] + " of " + frac[1] + " (" + p + "%)") + '">' + head +
+      '<span class="row-val"><b>' + frac[0] + " of " + frac[1] + "</b> · " + p + "%</span></div>" +
+      '<div class="track" role="img" aria-label="' + esc(label + " " + frac[0] + " of " + frac[1]) + '"><div class="fill' + (opts.ref ? " ref" : "") + '" style="width:' + (100 * frac[0] / frac[1]) + '%"></div></div>' +
+      (opts.note ? '<div class="na">' + esc(opts.note) + "</div>" : "") + "</div>";
+  }
+
+  /* A verdict stack: segments by count, counts written out below so colour is never the only cue. */
+  function stackRow(label, sub, v, total) {
+    var u = usableOf(v), p = Math.round(100 * u / total);
+    var segs = VERDICTS.map(function (d) {
+      var n = v[d.key] || 0;
+      if (!n) return "";
+      return '<span class="seg v-' + d.key + '" style="flex:' + n + ' 1 0" title="' + esc(d.label + ": " + n + " of " + total) + '">' + (n / total >= 0.07 ? n : "") + "</span>";
+    }).join("");
+    var key = VERDICTS.filter(function (d) { return d.key !== "noAnswer" || v.noAnswer; }).map(function (d) { return d.label + " " + (v[d.key] || 0); }).join(" · ");
+    return '<div><div class="row-head"><span class="row-label">' + esc(label) + (sub ? ' <span class="row-sub">' + esc(sub) + "</span>" : "") + "</span>" +
+      '<span class="row-val">usable <b>' + u + " of " + total + "</b> · " + p + "%</span></div>" +
+      '<div class="stack" role="img" aria-label="' + esc(label + ": " + key + ", of " + total) + '">' + segs + "</div>" +
+      '<div class="stack-key">' + esc(key) + " · of " + total + "</div></div>";
+  }
+
+  function chips(cell) {
+    return '<span class="chips">' + String(cell).split(" / ").map(function (w) {
+      var k = WORD_KEY[w.trim()];
+      return k ? '<span class="chip v-' + k + '">' + esc(w.trim()) + "</span>" : esc(w);
+    }).join("") + "</span>";
+  }
+  function table(head, rows, cls, wrapCls) {
+    return '<div class="tbl-wrap ' + (wrapCls || "") + '" tabindex="0"><table class="' + (cls || "") + '"><thead>' + head + "</thead><tbody>" + rows + "</tbody></table></div>";
+  }
+  function headRow(cells) { return "<tr>" + cells.map(function (c) { return '<th class="' + (c.cls || "") + '" scope="col">' + esc(c.t) + "</th>"; }).join("") + "</tr>"; }
+  function cellValue(set, col) {
+    var v = get(set, col.path);
+    if (v === undefined || v === null) return '<td class="num"></td>';
+    if (col.type === "frac") return '<td class="num">' + v[0] + " of " + v[1] + "</td>";
+    return '<td class="num">' + fmt(v) + "</td>";
+  }
+
+  /* ---------- Section renderers ---------- */
+  function renderPipeline(sec, sets) {
+    var h = "";
+    h += '<h3>Usable answers and compiles, per stage</h3><div class="grid2">';
+    sets.forEach(function (s) {
+      h += '<div class="panel" id="' + s.id + '-bars"><div class="panel-title"><h3>' + esc(s.label) + '</h3><span class="cond">' + esc(s.conditions) + "</span></div>";
+      h += '<div class="sub-h">Usable (same or close)</div><div class="bars">';
+      sec.stages.forEach(function (st) { var r = s.stages[st.key]; if (r) h += barRow(st.label, null, r.usable); });
+      h += '</div><div class="sub-h">Compiles, of those checkable</div><div class="bars">';
+      sec.stages.forEach(function (st) {
+        var r = s.stages[st.key]; if (!r) return;
+        h += barRow(st.label, null, r.compiles, { note: r.unspliced ? "could not be spliced: " + r.unspliced[0] + " of " + r.unspliced[1] : null });
+      });
+      h += "</div></div>";
+    });
+    h += "</div>";
+
+    h += '<h3 id="pipeline-mix">Verdict mix per stage</h3>' + legend(true) + '<div class="grid2">';
+    sets.forEach(function (s) {
+      h += '<div class="panel"><div class="panel-title"><h3>' + esc(s.label) + '</h3></div><div class="vrows">';
+      sec.stages.forEach(function (st) { var r = s.stages[st.key]; if (r) h += stackRow(st.label, st.sub, r.verdicts, r.answers); });
+      h += "</div></div>";
+    });
+    h += "</div>";
+
+    var maxTok = 0;
+    sets.forEach(function (s) { sec.stages.forEach(function (st) { var r = s.stages[st.key]; if (r && r.answerTokens > maxTok) maxTok = r.answerTokens; }); });
+    h += '<h3 id="pipeline-tokens">Token cost per stage</h3><div class="grid2">';
+    sets.forEach(function (s) {
+      var rows = sec.stages.map(function (st) {
+        var r = s.stages[st.key]; if (!r) return "";
+        var w = Math.max(2, Math.round(60 * r.answerTokens / maxTok));
+        return "<tr><td>" + esc(st.label) + '</td><td class="num">' + r.answers + '</td><td class="num">' + fmt(r.calls) + '</td><td class="num">' + fmt(r.promptTokens) +
+          '</td><td class="num">' + fmt(r.answerTokens) + '<span class="minibar" style="width:' + w + 'px" aria-hidden="true"></span></td></tr>';
+      }).join("");
+      h += '<div class="panel"><div class="panel-title"><h3>' + esc(s.label) + "</h3></div>" +
+        table(headRow([{ t: "Stage" }, { t: "Answers", cls: "num" }, { t: "Model calls", cls: "num" }, { t: "Prompt tokens", cls: "num" }, { t: "Answer tokens", cls: "num" }]), rows, "nowrap") + "</div>";
+    });
+    h += '</div><p class="note">' + esc(sec.tokenNote) + "</p>";
+
+    h += '<h3>Other measurements</h3><div class="grid2">';
+    sets.forEach(function (s) {
+      h += '<div class="panel"><div class="panel-title"><h3>' + esc(s.label) + '</h3></div><ul class="findings">' + s.extra.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join("") + "</ul></div>";
+    });
+    h += "</div>";
+
+    var tasks = Object.keys(sets[0].perTask);
+    sets.slice(1).forEach(function (s) { Object.keys(s.perTask).forEach(function (t) { if (tasks.indexOf(t) < 0) tasks.push(t); }); });
+    var head = '<tr><th scope="col" rowspan="2">Task</th>' + sets.map(function (s) { return '<th class="grp" colspan="' + sec.stages.length + '" scope="colgroup">' + esc(s.label) + "</th>"; }).join("") + "</tr><tr>" +
+      sets.map(function () { return sec.stages.map(function (st, i) { return '<th scope="col" class="' + (i === 0 ? "gs" : "") + '">' + esc(st.label) + "</th>"; }).join(""); }).join("") + "</tr>";
+    var notes = [];
+    var rows = tasks.map(function (t) {
+      return '<tr><td class="mono">' + esc(t) + "</td>" + sets.map(function (s) {
+        var cells = s.perTask[t] || [];
+        var fn = s.perTaskFootnotes && s.perTaskFootnotes[t];
+        if (fn && notes.indexOf(fn) < 0) notes.push(fn);
+        return sec.stages.map(function (st, i) {
+          var c = cells[i];
+          return '<td class="' + (i === 0 ? "gs" : "") + '">' + (c ? chips(c) : "") + (fn && i === 0 ? " *" : "") + "</td>";
+        }).join("");
+      }).join("") + "</tr>";
+    }).join("");
+    h += '<details id="pipeline-tasks"><summary>Per-task verdicts (' + tasks.length + " tasks)</summary>" + legend(true) +
+      '<p class="note">' + esc(sec.perTaskNote) + "</p>" + table(head, rows, "nowrap stick", "tall stick") +
+      notes.map(function (n) { return '<p class="note">* ' + esc(n) + "</p>"; }).join("") + "</details>";
+    return h;
+  }
+
+  function perTaskTable(sec, sets, chipCells) {
+    var withTasks = sets.filter(function (s) { return s.perTask; });
+    if (!withTasks.length) return "";
+    var tasks = sec.taskNames ? Object.keys(sec.taskNames) : Object.keys(withTasks[0].perTask);
+    withTasks.forEach(function (s) { Object.keys(s.perTask).forEach(function (t) { if (tasks.indexOf(t) < 0) tasks.push(t); }); });
+    var showDesc = sec.taskNames && sec.kind === "heldout";
+    var cols = [{ t: "Task" }].concat(showDesc ? [{ t: "What it asks" }] : []).concat(withTasks.map(function (s) { return { t: s.label }; }));
+    var rows = tasks.map(function (t) {
+      var first = sec.kind === "heldout" ? '<td class="mono">' + esc(t) + "</td>" : "<td>" + esc((sec.taskNames && sec.taskNames[t]) || t) + "</td>";
+      var desc = showDesc ? '<td style="white-space:normal;min-width:14em">' + esc(sec.taskNames[t] || "") + "</td>" : "";
+      return "<tr>" + first + desc + withTasks.map(function (s) { var c = s.perTask[t]; return "<td>" + (c == null ? "" : chipCells ? chips(c) : esc(c)) + "</td>"; }).join("") + "</tr>";
+    }).join("");
+    return '<details id="' + sec.id + '-tasks"><summary>Per-task verdicts (' + tasks.length + " tasks)</summary>" + (chipCells ? legend(true) : "") +
+      (sec.perTaskNote ? '<p class="note">' + esc(sec.perTaskNote) + "</p>" : "") + table(headRow(cols), rows, "nowrap stick", "stick" + (tasks.length > 15 ? " tall" : "")) + "</details>";
+  }
+
+  function renderHeldout(sec, sets) {
+    var h = '<div class="panel" id="' + sec.id + '-mix"><div class="panel-title"><h3>Verdicts</h3><span class="cond">Usable means same or close</span></div>' + legend(true) + '<div class="vrows">';
+    var lastGroup = null;
+    sets.forEach(function (s) {
+      if (s.group && s.group !== lastGroup) { h += '<div class="group-label">' + esc(s.group) + "</div>"; lastGroup = s.group; }
+      h += stackRow(s.label, s.conditions, s.verdicts, s.answers);
+    });
+    h += "</div></div>";
+    var rows = sets.map(function (s) { return "<tr><td>" + esc(s.label) + "</td>" + sec.table.map(function (c) { return cellValue(s, c); }).join("") + "</tr>"; }).join("");
+    h += table(headRow([{ t: "Set" }].concat(sec.table.map(function (c) { return { t: c.label, cls: "num" }; }))), rows, "nowrap stick", "stick");
+    if (sec.tableNote) h += '<p class="note">' + esc(sec.tableNote) + "</p>";
+    h += perTaskTable(sec, sets, true);
+    return h;
+  }
+
+  function renderSix(sec, sets) {
+    var h = '<div class="grid3">';
+    sec.metrics.forEach(function (m) {
+      h += '<div class="panel" id="six-' + m.key + '"><div class="panel-title"><h3>' + esc(m.label) + '</h3><span class="cond">of 12 answers</span></div><div class="bars">';
+      sets.forEach(function (s) { h += barRow(s.label, s.reference ? "reference" : null, s.scores[m.key], { ref: s.reference }); });
+      h += "</div></div>";
+    });
+    h += '</div><p class="note">The hatched bar is Claude Haiku 5.5, the reference set.</p>';
+    var rows = sets.map(function (s) {
+      return "<tr><td>" + esc(s.label) + "</td><td>" + esc(s.date) + "</td>" + sec.metrics.map(function (m) { var f = s.scores[m.key]; return '<td class="num">' + f[0] + "/" + f[1] + "</td>"; }).join("") +
+        '<td class="num">' + (s.answerTokensEstimated ? "~" + fmt(s.answerTokens) + " (est.)" : fmt(s.answerTokens)) + '</td><td style="min-width:16em">' + esc(s.closestClaude) + "</td><td>" + esc(s.grader) + "</td></tr>";
+    }).join("");
+    h += table(headRow([{ t: "Set" }, { t: "Graded" }].concat(sec.metrics.map(function (m) { return { t: m.label, cls: "num" }; })).concat([{ t: "Answer tokens", cls: "num" }, { t: "Closest Claude (est.)" }, { t: "Grader" }])), rows, "stick", "stick");
+    var setup = sets.map(function (s) {
+      return "<tr><td>" + esc(s.label) + "</td><td>" + esc(s.model) + "</td><td>" + esc(s.quant) + '</td><td style="min-width:12em">' + esc(s.gpu) + "</td><td>" + esc(s.kv) + "</td><td>" + esc(s.context) + '</td><td style="min-width:9em">' + esc(s.vram) + '</td><td class="num">' + esc(s.toks) + "</td></tr>";
+    }).join("");
+    h += '<details id="six-setup"><summary>Setup per set</summary>' +
+      table(headRow([{ t: "Set" }, { t: "Model" }, { t: "Quant" }, { t: "GPU (power limit)" }, { t: "KV cache" }, { t: "Context" }, { t: "VRAM" }, { t: "tok/s", cls: "num" }]), setup, "stick", "stick") +
+      '<p class="note">tok/s depends on the card and its power limit. VRAM is from /api/ps at that context.</p></details>';
+    h += perTaskTable(sec, sets, false);
+    return h;
+  }
+
+  function renderHistory(sec, sets) {
+    var rows = sets.map(function (s) {
+      var n = s.scoreNotes || {};
+      function f(k) { var v = s.scores[k]; return v[0] + "/" + v[1] + (n[k] ? ' <span class="row-sub">(' + esc(n[k]) + ")</span>" : ""); }
+      return "<tr><td>" + esc(s.label) + "</td><td>" + esc(s.think) + "</td><td>" + esc(s.rules) + "</td><td>" + f("firstTry") + "</td><td>" + f("rightAfterRepairs") +
+        '</td><td class="num">' + fmt(s.answerTokens) + "</td><td>" + esc(s.closestClaude) + "</td></tr>";
+    }).join("");
+    var h = table(headRow([{ t: "Set" }, { t: "Think" }, { t: "Rules" }, { t: "First-try compiles" }, { t: "Right after ≤2 one-line repairs" }, { t: "Answer tokens", cls: "num" }, { t: "Closest Claude (est.)" }]), rows, "nowrap stick", "stick");
+    h += perTaskTable(sec, sets, false);
+    return h;
+  }
+
+  /* ---------- Page ---------- */
+  var main = document.getElementById("main");
+  document.getElementById("lede").textContent =
+    "Measured results of local models writing C# for The Classrooms, newest first. Every number comes from the result files in Ollama-Hive and TheClassrooms-training; percentages are worked out on this page from the counts. Each section measured something different with different graders, so compare sets within a section, not across sections.";
+  document.getElementById("toc").innerHTML = DATA.sections.map(function (s) { return '<a href="#' + s.id + '">' + esc(s.title) + "</a>"; }).join("");
+
+  var html = "";
+  DATA.sections.forEach(function (sec) {
+    var sets = setsFor(sec.id);
+    html += '<section class="block" id="' + sec.id + '" aria-labelledby="' + sec.id + '-h"><div class="sec-head"><h2 id="' + sec.id + '-h">' + esc(sec.title) + '</h2><span class="sec-date">' + esc(sec.date) + "</span></div>";
+    html += '<p class="lede">' + esc(sec.about) + "</p>" + findingsList(sec.findings);
+    try {
+      if (sec.kind === "pipeline") html += renderPipeline(sec, sets);
+      else if (sec.kind === "heldout") html += renderHeldout(sec, sets);
+      else if (sec.kind === "six") html += renderSix(sec, sets);
+      else if (sec.kind === "history") html += renderHistory(sec, sets);
+    } catch (e) {
+      html += '<p class="note">This section could not be drawn: ' + esc(e.message) + ". Check its entries in DATA.</p>";
+    }
+    html += caveatsBox(sec.caveats) + srcLine(sec.sources) + "</section>";
+  });
+  main.innerHTML = html;
+  document.getElementById("foot").innerHTML = "<p>Data last updated " + esc(DATA.lastUpdated) + ". Source files: " +
+    Object.keys(DATA.files).map(function (k) { return "<code>" + esc(DATA.files[k]) + "</code>"; }).join(", ") + ".</p><p>Kept in <code>Ollama-Hive/eval/dashboard/</code>; see its README.md to add a result set.</p>";
+})();
+</script>
